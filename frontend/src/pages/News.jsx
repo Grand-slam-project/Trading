@@ -2,10 +2,49 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Header from '../components/Header.jsx'
 import { fetchNewsArticles } from '../lib/supabaseClient.js'
 
+const PAGE_SIZE = 10
+
 const marketOptions = [
   { value: 'ALL', label: '전체' },
   { value: 'DOMESTIC', label: '국내' },
   { value: 'GLOBAL', label: '해외' },
+]
+
+const categoryOptions = [
+  { value: 'ALL', label: '전체 카테고리' },
+  { value: 'market', label: '시장' },
+  { value: 'macro', label: '매크로' },
+  { value: 'sentiment', label: '수급/심리' },
+  { value: 'sector', label: '섹터' },
+  { value: 'symbol', label: '종목' },
+]
+
+const categoryGuide = [
+  {
+    key: 'market',
+    title: '시장',
+    description: '코스피, 코스닥, 증시, 환율, 금리처럼 국내 시장 전체 흐름을 묶습니다.',
+  },
+  {
+    key: 'macro',
+    title: '매크로',
+    description: '인플레이션, FOMC, 연준, 미국 국채처럼 거시경제와 글로벌 변수 중심입니다.',
+  },
+  {
+    key: 'sentiment',
+    title: '수급/심리',
+    description: '외국인 순매수, 기관 순매수, 공매도, 신용융자처럼 자금 흐름과 투자 심리 이슈입니다.',
+  },
+  {
+    key: 'sector',
+    title: '섹터',
+    description: '반도체, 이차전지, 배터리, 바이오, 인공지능, AI처럼 주도 업종 흐름을 모읍니다.',
+  },
+  {
+    key: 'symbol',
+    title: '종목',
+    description: '현재는 symbol 값이 있는 기사 위주로 분류되며, 국내 관심종목은 watchlist가 채워져야 확장됩니다.',
+  },
 ]
 
 function formatDate(value) {
@@ -20,8 +59,15 @@ function formatDate(value) {
   }).format(date)
 }
 
+function getCategoryLabel(item) {
+  const category = item.raw_payload?.query_category
+  if (!category && item.symbol) return '종목'
+  return categoryOptions.find((option) => option.value === category)?.label || '일반'
+}
+
 export default function News({ isLoggedIn, userEmail, handleLogout }) {
   const [newsMarket, setNewsMarket] = useState('ALL')
+  const [newsCategory, setNewsCategory] = useState('ALL')
   const [newsQuery, setNewsQuery] = useState('')
   const [newsItems, setNewsItems] = useState([])
   const [newsLoading, setNewsLoading] = useState(false)
@@ -31,20 +77,16 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
   const [page, setPage] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
 
-  const PAGE_SIZE = 10
-
-  const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
-  }, [totalCount])
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(totalCount / PAGE_SIZE)), [totalCount])
 
   const pageNumbers = useMemo(() => {
-    const MAX_VISIBLE = 9
-    let start = Math.max(1, page - Math.floor(MAX_VISIBLE / 2))
-    let end = start + MAX_VISIBLE - 1
+    const maxVisible = 9
+    let start = Math.max(1, page - Math.floor(maxVisible / 2))
+    let end = start + maxVisible - 1
 
     if (end > totalPages) {
       end = totalPages
-      start = Math.max(1, end - MAX_VISIBLE + 1)
+      start = Math.max(1, end - maxVisible + 1)
     }
 
     const numbers = []
@@ -55,35 +97,28 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
   }, [page, totalPages])
 
   const loadNews = useCallback(async () => {
-    const callId = Math.random().toString(36).slice(2, 7)
     setNewsLoading(true)
     setNewsError('')
 
     try {
       const res = await fetchNewsArticles({
         market: newsMarket,
+        category: newsCategory,
         query: newsQuery,
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
       })
 
-      // response received
-
       const items = res?.items || []
-      const total = res?.totalCount || 0
-
       setNewsItems(items)
-      setTotalCount(total)
+      setTotalCount(res?.totalCount || 0)
       setLastFetchedAt(items?.[0]?.fetched_at || '')
-
-      // state applied
-
     } catch (error) {
       setNewsError(error.message)
     } finally {
       setNewsLoading(false)
     }
-  }, [newsMarket, newsQuery, page])
+  }, [newsCategory, newsMarket, newsQuery, page])
 
   useEffect(() => {
     loadNews()
@@ -96,27 +131,44 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
   }, [newsItems])
 
   return (
-    <div className="min-h-screen bg-obsidian-bg text-[#e2e2ec] font-inter px-6 py-8">
+    <div className="min-h-screen bg-obsidian-bg px-4 py-6 font-inter text-[#e2e2ec] sm:px-6 sm:py-8">
       <Header isLoggedIn={isLoggedIn} userEmail={userEmail} handleLogout={handleLogout} />
 
-      <main className="max-w-7xl mx-auto">
-        <section className="ai-glass rounded-lg p-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between mb-5">
+      <main className="mx-auto max-w-7xl">
+        <section className="ai-glass rounded-lg p-4 sm:p-6">
+          <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <h2 className="text-2xl font-bold text-white">News Board</h2>
-              <p className="text-sm text-slate-400 mt-1">Supabase DB에서 읽어오는 게시판형 뉴스 피드입니다.</p>
+              <p className="mt-1 text-sm text-slate-400">
+                Supabase에 적재된 국내·해외 뉴스를 게시판 형태로 보여줍니다.
+              </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[140px_170px_minmax(220px,1fr)]">
               <select
                 value={newsMarket}
-                onChange={(e) => {
-                  setNewsMarket(e.target.value)
+                onChange={(event) => {
+                  setNewsMarket(event.target.value)
                   setPage(1)
                 }}
-                className="bg-[#0F172A] border border-slate-700 rounded px-3 py-2 text-sm text-white"
+                className="rounded border border-slate-700 bg-[#0F172A] px-3 py-2 text-sm text-white"
               >
                 {marketOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={newsCategory}
+                onChange={(event) => {
+                  setNewsCategory(event.target.value)
+                  setPage(1)
+                }}
+                className="rounded border border-slate-700 bg-[#0F172A] px-3 py-2 text-sm text-white"
+              >
+                {categoryOptions.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
@@ -126,43 +178,76 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
               <input
                 type="text"
                 value={newsQuery}
-                onChange={(e) => {
-                  setNewsQuery(e.target.value)
+                onChange={(event) => {
+                  setNewsQuery(event.target.value)
                   setPage(1)
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
                     setPage(1)
                     loadNews()
                   }
                 }}
-                placeholder="종목명 또는 티커 검색"
-                className="min-w-[240px] bg-[#0F172A] border border-slate-700 rounded px-3 py-2 text-sm text-white"
+                placeholder="종목명, 티커, 키워드 검색"
+                className="min-w-0 rounded border border-slate-700 bg-[#0F172A] px-3 py-2 text-sm text-white"
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-slate-surface border border-slate-700 rounded-lg p-4">
-              <div className="text-xs uppercase tracking-wider text-slate-400">Total</div>
-              <div className="text-2xl font-bold text-white mt-1">{newsStats.total}</div>
+          <div className="mb-6 rounded-xl border border-slate-800 bg-[#0c1019]/80 p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-white">카테고리 기준</h3>
+                <p className="mt-1 text-xs text-slate-400">
+                  검색 아래에서 각 카테고리가 어떤 뉴스 묶음인지 바로 확인할 수 있습니다.
+                </p>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                종목은 현재 필터보다 검색창 직접 입력이 더 정확합니다.
+              </div>
             </div>
-            <div className="bg-slate-surface border border-slate-700 rounded-lg p-4">
-              <div className="text-xs uppercase tracking-wider text-slate-400">Domestic</div>
-              <div className="text-2xl font-bold text-white mt-1">{newsStats.domestic}</div>
-            </div>
-            <div className="bg-slate-surface border border-slate-700 rounded-lg p-4">
-              <div className="text-xs uppercase tracking-wider text-slate-400">Global</div>
-              <div className="text-2xl font-bold text-white mt-1">{newsStats.global}</div>
+
+            <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
+              {categoryGuide.map((item) => {
+                const isActive = newsCategory === item.key
+                return (
+                  <div
+                    key={item.key}
+                    className={
+                      isActive
+                        ? 'rounded-lg border border-ai-cyan/50 bg-ai-cyan/10 p-3'
+                        : 'rounded-lg border border-slate-800 bg-[#0a0d14] p-3'
+                    }
+                  >
+                    <div className="text-sm font-semibold text-white">{item.title}</div>
+                    <p className="mt-1 text-xs leading-5 text-slate-400">{item.description}</p>
+                  </div>
+                )
+              })}
             </div>
           </div>
 
-          <div className="mb-4 text-xs text-slate-500">Last synced: {lastFetchedAt ? formatDate(lastFetchedAt) : 'unknown'}</div>
+          <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="rounded-lg border border-slate-700 bg-slate-surface p-4">
+              <div className="text-xs uppercase tracking-wider text-slate-400">현재 페이지</div>
+              <div className="mt-1 text-2xl font-bold text-white">{newsStats.total}</div>
+            </div>
+            <div className="rounded-lg border border-slate-700 bg-slate-surface p-4">
+              <div className="text-xs uppercase tracking-wider text-slate-400">국내</div>
+              <div className="mt-1 text-2xl font-bold text-white">{newsStats.domestic}</div>
+            </div>
+            <div className="rounded-lg border border-slate-700 bg-slate-surface p-4">
+              <div className="text-xs uppercase tracking-wider text-slate-400">해외</div>
+              <div className="mt-1 text-2xl font-bold text-white">{newsStats.global}</div>
+            </div>
+          </div>
 
-          {/* 디버깅 블록 제거됨 */}
+          <div className="mb-4 text-xs text-slate-500">
+            마지막 적재: {lastFetchedAt ? formatDate(lastFetchedAt) : '아직 표시할 적재 기록이 없습니다.'}
+          </div>
 
           {newsError ? (
-            <div className="p-4 rounded border border-red-800 bg-red-950/30 text-red-300 text-sm">{newsError}</div>
+            <div className="rounded border border-red-800 bg-red-950/30 p-4 text-sm text-red-300">{newsError}</div>
           ) : null}
 
           <div className="space-y-4">
@@ -171,7 +256,9 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
             ) : null}
 
             {!newsLoading && newsItems.length === 0 && !newsError ? (
-              <div className="text-sm text-slate-400">표시할 뉴스가 없습니다.</div>
+              <div className="text-sm text-slate-400">
+                표시할 뉴스가 없습니다. 백엔드에서 `POST /api/news/sync`를 실행해 적재 상태를 확인해 주세요.
+              </div>
             ) : null}
 
             {newsItems.map((item, index) => {
@@ -179,33 +266,36 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
               return (
                 <article
                   key={`${item.url}-${index}`}
-                  className="bg-slate-surface border border-slate-700 rounded-lg p-5 hover:border-ai-cyan/40 transition-all"
+                  className="rounded-lg border border-slate-700 bg-slate-surface p-4 transition-all hover:border-ai-cyan/40 sm:p-5"
                 >
                   <div className="flex flex-col gap-3">
                     <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
-                      <span className="px-2 py-1 rounded border border-ai-cyan/30 text-ai-cyan">
+                      <span className="rounded border border-ai-cyan/30 px-2 py-1 text-ai-cyan">
                         {item.market === 'DOMESTIC' ? '국내' : '해외'}
                       </span>
-                      <span className="px-2 py-1 rounded border border-slate-700 text-slate-300">{item.source}</span>
+                      <span className="rounded border border-slate-700 px-2 py-1 text-slate-300">{item.source}</span>
+                      <span className="rounded border border-slate-700 px-2 py-1 text-slate-300">
+                        {getCategoryLabel(item)}
+                      </span>
                       {item.symbol ? (
-                        <span className="px-2 py-1 rounded border border-slate-700 text-slate-300">{item.symbol}</span>
+                        <span className="rounded border border-slate-700 px-2 py-1 text-slate-300">{item.symbol}</span>
                       ) : null}
                       <span className="text-slate-500">{formatDate(item.published_at)}</span>
                     </div>
 
                     <div>
-                      <h3 className="text-lg font-bold text-white leading-snug">{item.title}</h3>
-                      <p className="text-sm text-slate-300 mt-2 leading-6">{item.summary}</p>
+                      <h3 className="break-words text-lg font-bold leading-snug text-white">{item.title}</h3>
+                      <p className="mt-2 break-words text-sm leading-6 text-slate-300">{item.summary}</p>
                     </div>
 
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="text-xs text-slate-500">
-                        {item.company_name ? `연관 종목: ${item.company_name}` : '연관 종목 정보 없음'}
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="break-words text-xs text-slate-500">
+                        {item.company_name ? `연관 키워드: ${item.company_name}` : '연관 키워드 정보 없음'}
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         <button
                           onClick={() => setExpandedNews(expanded ? null : `${item.url}-${index}`)}
-                          className="text-xs border border-slate-700 hover:border-slate-500 rounded px-3 py-1.5 text-slate-300"
+                          className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
                         >
                           {expanded ? '접기' : '요약 보기'}
                         </button>
@@ -213,7 +303,7 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
                           href={item.url}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-xs bg-ai-cyan text-black rounded px-3 py-1.5 font-semibold"
+                          className="rounded bg-ai-cyan px-3 py-1.5 text-xs font-semibold text-black"
                         >
                           원문 열기
                         </a>
@@ -221,9 +311,11 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
                     </div>
 
                     {expanded ? (
-                      <div className="mt-2 p-4 rounded bg-[#0c0e15] border border-slate-800 text-sm text-slate-300">
-                        <div className="font-semibold text-white mb-1">Board Preview</div>
-                        <p className="leading-6">{item.summary || '게시판 카드에서 바로 읽기 좋은 요약입니다.'}</p>
+                      <div className="mt-2 rounded border border-slate-800 bg-[#0c0e15] p-4 text-sm text-slate-300">
+                        <div className="mb-1 font-semibold text-white">게시판 요약</div>
+                        <p className="break-words leading-6">
+                          {item.summary || '아직 표시할 요약이 없습니다. 원문 링크에서 상세 내용을 확인해 주세요.'}
+                        </p>
                       </div>
                     ) : null}
                   </div>
@@ -232,18 +324,18 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
             })}
           </div>
 
-          <div className="flex justify-center items-center gap-1.5 mt-8 flex-wrap">
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-1.5">
             <button
               disabled={page === 1}
               onClick={() => setPage(1)}
-              className="px-2.5 py-1.5 text-xs rounded border border-slate-700 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed hover:border-slate-500"
+              className="rounded border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-30"
             >
               처음
             </button>
             <button
               disabled={page === 1}
               onClick={() => setPage((prev) => prev - 1)}
-              className="px-2.5 py-1.5 text-xs rounded border border-slate-700 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed hover:border-slate-500"
+              className="rounded border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-30"
             >
               이전
             </button>
@@ -254,8 +346,8 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
                 onClick={() => setPage(num)}
                 className={
                   num === page
-                    ? 'px-3 py-1.5 text-xs rounded bg-ai-cyan text-black font-semibold'
-                    : 'px-3 py-1.5 text-xs rounded border border-slate-700 text-slate-300 hover:border-ai-cyan/50'
+                    ? 'rounded bg-ai-cyan px-3 py-1.5 text-xs font-semibold text-black'
+                    : 'rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-ai-cyan/50'
                 }
               >
                 {num}
@@ -265,19 +357,18 @@ export default function News({ isLoggedIn, userEmail, handleLogout }) {
             <button
               disabled={page >= totalPages}
               onClick={() => setPage((prev) => prev + 1)}
-              className="px-2.5 py-1.5 text-xs rounded border border-slate-700 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed hover:border-slate-500"
+              className="rounded border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-30"
             >
               다음
             </button>
             <button
               disabled={page >= totalPages}
               onClick={() => setPage(totalPages)}
-              className="px-2.5 py-1.5 text-xs rounded border border-slate-700 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed hover:border-slate-500"
+              className="rounded border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-30"
             >
               마지막
             </button>
           </div>
-
         </section>
       </main>
     </div>

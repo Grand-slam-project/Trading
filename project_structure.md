@@ -49,6 +49,7 @@ teamproject/
 │   │   ├── binance_client.py     # 바이낸스 가상자산 확장 클라이언트 (현재 구현됨)
 │   │   ├── upbit_client.py       # 업비트 가상자산 클라이언트 (레거시/비활성화됨)
 │   │   ├── news_repository.py    # 뉴스 데이터 조회/저장 서비스 (현재 구현됨)
+│   │   ├── news_query_planner.py # 뉴스 수집 쿼리 예산/쿨다운/우선순위 플래너
 │   │   ├── news_ingest.py        # 뉴스 수집 서비스 (현재 구현됨)
 │   │   ├── agent.py              # LLM & LangChain 챗봇 오케스트레이터 (추가 예정)
 │   │   └── trading_engine.py     # 백그라운드 조건 감시 엔진 (추가 예정)

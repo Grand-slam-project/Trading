@@ -9,13 +9,13 @@ function buildHeaders() {
   }
 }
 
-export async function fetchNewsArticles({ market = 'ALL', query = '', limit = 20, offset = 0 }) {
+export async function fetchNewsArticles({ market = 'ALL', category = 'ALL', query = '', limit = 20, offset = 0 }) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error('Missing Supabase environment variables.')
   }
 
   const params = new URLSearchParams({
-    select: 'id,market,source,source_article_id,title,summary,url,published_at,fetched_at,company_name,symbol,language,sentiment,content_hash,is_active',
+    select: 'id,market,source,source_article_id,title,summary,url,published_at,fetched_at,company_name,symbol,language,sentiment,content_hash,is_active,raw_payload',
     order: 'published_at.desc',
     limit: String(limit),
     offset: String(offset),
@@ -24,6 +24,12 @@ export async function fetchNewsArticles({ market = 'ALL', query = '', limit = 20
 
   if (market && market !== 'ALL') {
     params.set('market', `eq.${market}`)
+  }
+
+  if (category === 'symbol') {
+    params.set('symbol', 'not.eq.')
+  } else if (category && category !== 'ALL') {
+    params.set('raw_payload->>query_category', `eq.${category}`)
   }
 
   if (query.trim()) {

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -25,7 +26,7 @@ class NewsRepository:
             return []
 
         params: dict[str, str] = {
-            "select": "id,market,source,source_article_id,title,summary,url,published_at,fetched_at,company_name,symbol,language,sentiment,content_hash,is_active",
+            "select": "id,market,source,source_article_id,title,summary,url,published_at,fetched_at,company_name,symbol,language,sentiment,content_hash,is_active,raw_payload",
             "order": "published_at.desc",
             "limit": str(limit),
             "offset": str(offset),
@@ -52,7 +53,7 @@ class NewsRepository:
         )
         response.raise_for_status()
         return response.json()
-    
+
     def count_articles(self, market: str = "ALL", query: str = "") -> int:
         if not self.supabase_url or not self.supabase_anon_key:
             return 0
@@ -84,8 +85,75 @@ class NewsRepository:
         )
         response.raise_for_status()
 
-        # Supabase count는 headers에 있음
+        # Supabase는 Content-Range 헤더에 전체 count를 반환합니다.
         return int(response.headers.get("Content-Range", "0").split("/")[-1])
+
+    def list_watchlist_symbols(self, limit: int = 5) -> list[dict[str, Any]]:
+        if not self.supabase_url or not self.supabase_service_role_key:
+            return []
+
+        params = {
+            "select": "symbol,name,exchange,asset_type,market_country,is_active,source,created_at",
+            "is_active": "eq.true",
+            "asset_type": "eq.STOCK",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            response = requests.get(
+                f"{self.supabase_url}/rest/v1/watchlist_symbols",
+                headers=self._service_read_headers(),
+                params=params,
+                timeout=15,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError:
+            # 동적 종목 테이블이 아직 없거나 RLS가 막힌 경우 정적 키워드 수집만 진행합니다.
+            return []
+
+    def list_recent_query_keys(self, since: datetime) -> list[str]:
+        if not self.is_configured:
+            return []
+
+        params = {
+            "select": "query_key",
+            "started_at": f"gte.{since.isoformat()}",
+            "request_count": "gt.0",
+        }
+        response = requests.get(
+            f"{self.supabase_url}/rest/v1/news_fetch_logs",
+            headers=self._service_read_headers(),
+            params=params,
+            timeout=15,
+        )
+        response.raise_for_status()
+        return [item["query_key"] for item in response.json() if item.get("query_key")]
+
+    def count_fetch_requests(self, source: str, since: datetime) -> int:
+        if not self.is_configured:
+            return 0
+
+        params = {
+            "select": "request_count",
+            "source": f"eq.{source}",
+            "started_at": f"gte.{since.isoformat()}",
+        }
+        response = requests.get(
+            f"{self.supabase_url}/rest/v1/news_fetch_logs",
+            headers=self._service_read_headers(),
+            params=params,
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        total = 0
+        for item in response.json():
+            try:
+                total += int(item.get("request_count") or 0)
+            except (TypeError, ValueError):
+                total += 0
+        return total
 
     def upsert_articles(self, articles: list[dict[str, Any]]) -> None:
         if not self.is_configured or not articles:
@@ -115,7 +183,14 @@ class NewsRepository:
             "apikey": self.supabase_anon_key,
             "Authorization": f"Bearer {self.supabase_anon_key}",
             "Content-Type": "application/json",
-            "Prefer": "count=exact"
+            "Prefer": "count=exact",
+        }
+
+    def _service_read_headers(self) -> dict[str, str]:
+        return {
+            "apikey": self.supabase_service_role_key,
+            "Authorization": f"Bearer {self.supabase_service_role_key}",
+            "Content-Type": "application/json",
         }
 
     def _write_headers(self) -> dict[str, str]:

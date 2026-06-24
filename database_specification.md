@@ -387,6 +387,26 @@ LightGBM 모델은 서비스 요청 중 직접 학습하지 않고, `ml/` 디렉
 | `source` | `TEXT` | DEFAULT 'ADMIN' | 편입 출처 (`ADMIN`, `USER`, `RANKING`, `MODEL`) |
 | `created_at` | `TIMESTAMPTZ` | DEFAULT now(), NOT NULL | 생성 일시 |
 
+### 5.1.1 뉴스 수집 연동 기준
+
+* `watchlist_symbols`는 뉴스 동적 수집 후보의 기준 테이블로도 사용합니다.
+* 뉴스 수집 워커는 `is_active = true`, `asset_type = 'STOCK'`인 종목 중 실행당 최대 `NEWS_DYNAMIC_SYMBOLS_PER_RUN`개만 선택합니다.
+* 종목 뉴스 쿼리는 단순 종목명 대신 `{종목명} 주식`, `{종목명} 실적`, `{종목명} 공시`, `{종목명} 영업이익` 변형을 순환 적용합니다.
+
+### 5.1.2 `news_articles` (게시판형 뉴스 기사)
+
+* **설명**: Naver/Finnhub 등 외부 뉴스 API 응답을 게시판 표시용 공통 스키마로 정규화해 저장합니다.
+* **중복 기준**: `url` 고유 인덱스를 우선 사용하고, 보조 식별자로 `content_hash`를 저장합니다.
+* **주요 컬럼**: `market`, `source`, `source_article_id`, `title`, `summary`, `url`, `published_at`, `fetched_at`, `company_name`, `symbol`, `language`, `sentiment`, `content_hash`, `is_active`, `raw_payload`.
+* **수집 메타데이터**: `raw_payload.query_category`, `raw_payload.query_key`, `raw_payload.query_text`, `raw_payload.collection_reason`을 저장해 프론트 카테고리 필터와 추후 분석에 사용합니다.
+
+### 5.1.3 `news_fetch_logs` (뉴스 수집 로그)
+
+* **설명**: 쿼리 단위 수집 성공/실패/스킵 이력을 기록해 무료 API 호출량과 쿨다운을 제어합니다.
+* **주요 컬럼**: `source`, `query_key`, `query_category`, `query_text`, `status`, `fetched_count`, `request_count`, `skipped_reason`, `error_message`, `started_at`, `finished_at`.
+* **호출 제한 기준**: `request_count` 합계로 일일 Naver 호출량을 계산하며, 기본 예산은 `NEWS_NAVER_DAILY_QUERY_BUDGET=2000`입니다.
+* **쿨다운 기준**: 최근 `NEWS_QUERY_COOLDOWN_MINUTES` 안에 기록된 동일 `query_key`는 `SKIPPED`로 기록하고 API를 호출하지 않습니다.
+
 ### 5.2 `market_candles` (캔들 원천 데이터)
 
 * **설명**: Toss, Coinone, Binance 등에서 수집한 OHLCV 캔들 데이터를 저장합니다.
