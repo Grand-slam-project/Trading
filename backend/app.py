@@ -23,6 +23,7 @@ from backend.services.coinone_client import CoinoneClient
 from backend.services.binance_client import BinanceClient
 from backend.services.news_repository import NewsRepository
 from backend.services.news_ingest import NewsIngestService
+from backend.services.news_summary_service import NewsSummaryService
 from backend.services.symbol_metadata import enrich_symbol
 from backend.scripts.export_training_candles import fetch_binance_klines, fetch_toss_candles, write_rows
 
@@ -45,6 +46,7 @@ KIS_ENV = os.getenv("KIS_ENV", "MOCK")
 crypto = CryptoHelper(ENCRYPTION_KEY)
 news_repository = NewsRepository()
 news_ingest_service = NewsIngestService()
+news_summary_service = NewsSummaryService()
 PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 NEWS_INGEST_ENABLED = os.getenv("NEWS_INGEST_ENABLED", "false").lower() == "true"
@@ -950,6 +952,71 @@ def sync_news_feed():
         return jsonify({
             "success": False,
             "message": f"Failed to sync news feed: {str(e)}"
+        }), 500
+
+
+@app.route("/api/news/summaries/ensure", methods=["POST"])
+def ensure_news_summaries():
+    try:
+        data = request.json or {}
+        article_ids = data.get("article_ids") or []
+        article_ids = [str(article_id).strip() for article_id in article_ids if str(article_id).strip()]
+
+        if not article_ids:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "items": [],
+                    "generatedCount": 0,
+                }
+            })
+
+        articles = news_repository.list_articles_by_ids(article_ids)
+        article_by_id = {article["id"]: article for article in articles if article.get("id")}
+        updates = []
+        items = []
+
+        for article_id in article_ids:
+            article = article_by_id.get(article_id)
+            if not article:
+                continue
+
+            existing_summary = (article.get("ai_summary") or "").strip()
+            if existing_summary:
+                items.append({
+                    "id": article_id,
+                    "ai_summary": existing_summary,
+                    "ai_summary_model": article.get("ai_summary_model"),
+                    "ai_summary_generated_at": article.get("ai_summary_generated_at"),
+                    "ai_summary_prompt_version": article.get("ai_summary_prompt_version"),
+                })
+                continue
+
+            summary_payload = news_summary_service.summarize(article)
+            update_row = {
+                "id": article_id,
+                "ai_summary": summary_payload["ai_summary"],
+                "ai_summary_model": summary_payload["ai_summary_model"],
+                "ai_summary_generated_at": datetime.utcnow().isoformat() + "Z",
+                "ai_summary_prompt_version": summary_payload["ai_summary_prompt_version"],
+            }
+            updates.append(update_row)
+            items.append(update_row)
+
+        if updates:
+            news_repository.upsert_article_summaries(updates)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "items": items,
+                "generatedCount": len(updates),
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Failed to ensure news summaries: {str(e)}"
         }), 500
 
 

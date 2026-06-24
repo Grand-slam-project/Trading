@@ -53,6 +53,7 @@ teamproject/
 │   │   ├── binance_client.py     # 바이낸스 가상자산 확장 클라이언트 (현재 구현됨)
 │   │   ├── upbit_client.py       # 업비트 가상자산 클라이언트 (레거시/비활성화됨)
 │   │   ├── news_repository.py    # 뉴스 데이터 조회/저장 서비스 (현재 구현됨)
+│   │   ├── news_summary_service.py # 뉴스 GPT 요약 생성 서비스
 │   │   ├── news_query_planner.py # 뉴스 수집 쿼리 예산/쿨다운/우선순위 플래너
 │   │   ├── news_ingest.py        # 뉴스 수집 서비스 (현재 구현됨)
 │   │   ├── symbol_metadata.py    # 모델 결과 표시용 심볼명/시장/섹터 메타데이터 매핑 (현재 구현됨)
