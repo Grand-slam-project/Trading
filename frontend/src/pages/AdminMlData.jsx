@@ -1641,7 +1641,7 @@ function ModelResultCard({ title, result }) {
   )
 }
 
-export default function AdminMlData({ isLoggedIn, userEmail, handleLogout }) {
+export default function AdminMlData({ isLoggedIn, userEmail, handleLogout, hideHeader = false }) {
   const [mode, setMode] = useState('crypto')
   const [form, setForm] = useState(presets.crypto)
   const [loading, setLoading] = useState(false)
@@ -2340,8 +2340,10 @@ export default function AdminMlData({ isLoggedIn, userEmail, handleLogout }) {
   }
 
   return (
-    <div className="min-h-screen bg-obsidian-bg px-6 py-8 text-[#e2e2ec]">
-      <Header isLoggedIn={isLoggedIn} userEmail={userEmail} handleLogout={handleLogout} />
+    <div className={hideHeader ? 'text-[#e2e2ec]' : 'min-h-screen bg-obsidian-bg px-6 py-8 text-[#e2e2ec]'}>
+      {!hideHeader && (
+        <Header isLoggedIn={isLoggedIn} userEmail={userEmail} handleLogout={handleLogout} />
+      )}
 
       <main className="mx-auto flex max-w-7xl flex-col gap-6">
         <section className="ai-glass rounded-lg p-6">

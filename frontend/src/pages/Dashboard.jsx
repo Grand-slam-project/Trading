@@ -8,6 +8,7 @@ import { getAssetPeriodRange } from '../dashboardUtils.js'
 import WatchlistTab from './WatchlistTab.jsx'
 import AssetsTab from './AssetsTab.jsx'
 import TradeHistoryTab from './TradeHistoryTab.jsx'
+import AdminMlData from './AdminMlData.jsx'
 
 const DASHBOARD_API_BASE_URL = 'http://localhost:5050'
 const BALANCE_EXCHANGE_ORDER = ['TOSS', 'KIS', 'COINONE', 'BINANCE']
@@ -716,6 +717,14 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
           {activeTab === 'watchlist' && <WatchlistTab />}
           {activeTab === 'assets' && <AssetsTab balance={balance} allocation={allocation} />}
           {activeTab === 'history' && <TradeHistoryTab />}
+          {activeTab === 'admin' && (
+            <AdminMlData
+              isLoggedIn={isLoggedIn}
+              userEmail={userEmail}
+              handleLogout={handleLogout}
+              hideHeader={true}
+            />
+          )}
           {activeTab === 'settings' && (
             <Settings
               isLoggedIn={isLoggedIn}

@@ -43,14 +43,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [orderbook, setOrderbook] = useState(null)
   const [trades, setTrades] = useState([])
   const [userBalance, setUserBalance] = useState(null)
+  const [balanceMessage, setBalanceMessage] = useState('')
   const [activeTab, setActiveTab] = useState('news') // news | community
   const [newsList, setNewsList] = useState([])
   const [loadingNews, setLoadingNews] = useState(false)
   const [displayName, setDisplayName] = useState(symbol)
   const [marketFeeds, setMarketFeeds] = useState({
     candles: { source: 'IDLE', isMock: false, degradedReason: '' },
-    orderbook: { source: 'IDLE', isMock: false, degradedReason: '' },
-    trades: { source: 'IDLE', isMock: false, degradedReason: '' },
+    orderbook: { source: 'OFF', isMock: false, degradedReason: '' },
+    trades: { source: 'OFF', isMock: false, degradedReason: '' },
   })
   const [orderPrecheck, setOrderPrecheck] = useState(null)
   const [precheckLoading, setPrecheckLoading] = useState(false)
@@ -60,12 +61,19 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const chartContainerRef = useRef(null)
   const chartRef = useRef(null)
   const candleSeriesRef = useRef(null)
+  const hasAppliedInitialFitRef = useRef(false)
   const abortControllerRef = useRef(null)
   const lastCandleSignatureRef = useRef('')
+  const orderbookTradesInFlightRef = useRef(false)
+  const candlesInFlightRef = useRef(false)
 
   const isIntradayInterval = !['1d', '1w', '1M'].includes(chartInterval)
   const effectiveOrderPrice = orderType === 'LIMIT' ? Number(price || 0) : currentPrice
   const totalEstimatedAmount = effectiveOrderPrice * Number(quantity || 0)
+  const isStockAsset = resolvedAssetType === 'STOCK'
+  const showLevel2Panel = false
+  const chartPollMs = isStockAsset ? (isIntradayInterval ? 20000 : 30000) : (isIntradayInterval ? 5000 : 15000)
+  const level2PollMs = isStockAsset ? 10000 : 2000
 
   // 세션 토큰 헤더 획득 헬퍼
   const getAuthHeader = async () => {
@@ -234,8 +242,42 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     return `${items.length}:${lastItem.time}:${lastItem.close}:${lastItem.volume}`
   }
 
+  const normalizeHoldingSymbol = (value) => {
+    const normalized = String(value || '').trim().toUpperCase()
+    if (/^A\d{6}$/.test(normalized)) {
+      return normalized.slice(1)
+    }
+    return normalized
+  }
+
+  const formatChartDateTime = (unixSeconds) => {
+    const date = new Date(unixSeconds * 1000)
+    return new Intl.DateTimeFormat('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date)
+  }
+
+  const formatChartTick = (time) => {
+    if (typeof time === 'number') {
+      return formatChartDateTime(time)
+    }
+    if (typeof time === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(time)) {
+      const [year, month, day] = time.split('-')
+      return `${month}.${day}`
+    }
+    return String(time)
+  }
+
   const getOverallFeedStatus = () => {
-    const sources = Object.values(marketFeeds)
+    const sources = Object.values(marketFeeds).filter((item) => item.source !== 'OFF')
+    if (!sources.length) {
+      return { label: 'LIVE', tone: 'text-emerald-300 bg-emerald-950/40 border-emerald-800/60' }
+    }
     if (sources.some((item) => item.isMock || item.source === 'MOCK')) {
       return { label: 'MOCK', tone: 'text-amber-300 bg-amber-950/40 border-amber-800/60' }
     }
@@ -252,11 +294,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
 
   // 1. 시세 캔들 로드
   const fetchCandles = async ({ silent = false } = {}) => {
+    if (candlesInFlightRef.current) {
+      return
+    }
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
     }
     const controller = new AbortController()
     abortControllerRef.current = controller
+    candlesInFlightRef.current = true
 
     if (!silent) {
       setLoadingChart(true)
@@ -371,6 +417,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       }
       console.error('시세 API 호출 오류:', error)
     } finally {
+      candlesInFlightRef.current = false
       if (abortControllerRef.current === controller) {
         setLoadingChart(false)
       }
@@ -379,6 +426,10 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
 
   // 2. 실시간 호가/체결 데이터 로드 (폴링)
   const fetchOrderbookAndTrades = async () => {
+    if (orderbookTradesInFlightRef.current || document.visibilityState !== 'visible') {
+      return
+    }
+    orderbookTradesInFlightRef.current = true
     try {
       const chartEx = exchange;
       const chartEnv = brokerEnv;
@@ -427,13 +478,19 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       }
     } catch (e) {
       console.error("실시간 호가/체결 갱신 오류:", e);
+    } finally {
+      orderbookTradesInFlightRef.current = false
     }
   }
 
   // 3. 실시간 유저 자산 잔고 로드
   const fetchUserBalance = async () => {
     const authHeader = await getAuthHeader()
-    if (!authHeader) return
+    if (!authHeader) {
+      setUserBalance(null)
+      setBalanceMessage('로그인 후 보유현황을 확인할 수 있어요.')
+      return
+    }
 
     try {
       const payload = {
@@ -451,9 +508,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       const resData = await response.json()
       if (resData.success) {
         setUserBalance(resData.data)
+        setBalanceMessage('')
+      } else {
+        setUserBalance(null)
+        setBalanceMessage(resData.message || `${exchange} (${brokerEnv}) 잔고를 불러오지 못했습니다.`)
       }
     } catch (error) {
       console.error('잔고 로드 실패:', error)
+      setUserBalance(null)
+      setBalanceMessage(`잔고 로드 실패: ${error.message}`)
     }
   }
 
@@ -577,50 +640,69 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       if (document.visibilityState === 'visible') {
         fetchCandles({ silent: true })
       }
-    }, isIntradayInterval ? 5000 : 15000)
+    }, chartPollMs)
 
     return () => window.clearInterval(intervalId)
-  }, [exchange, symbol, chartInterval, brokerEnv, isIntradayInterval])
+  }, [exchange, symbol, chartInterval, brokerEnv, chartPollMs])
 
   useEffect(() => {
-    fetchOrderbookAndTrades();
-    const intervalId = setInterval(fetchOrderbookAndTrades, 2000); // 2초마다 갱신
-    return () => clearInterval(intervalId);
-  }, [exchange, symbol, brokerEnv]);
+    if (!showLevel2Panel) {
+      setMarketFeeds((prev) => ({
+        ...prev,
+        orderbook: { source: 'OFF', isMock: false, degradedReason: '', checkedAt: undefined },
+        trades: { source: 'OFF', isMock: false, degradedReason: '', checkedAt: undefined },
+      }))
+      return
+    }
+    const timeoutId = window.setTimeout(() => {
+      fetchOrderbookAndTrades()
+    }, isStockAsset ? 1200 : 0)
+    const intervalId = window.setInterval(fetchOrderbookAndTrades, level2PollMs)
+    const visibilityHandler = () => {
+      if (document.visibilityState === 'visible') {
+        fetchOrderbookAndTrades()
+      }
+    }
+    document.addEventListener('visibilitychange', visibilityHandler)
+    return () => {
+      window.clearTimeout(timeoutId)
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', visibilityHandler)
+    }
+  }, [exchange, symbol, brokerEnv, level2PollMs, isStockAsset, showLevel2Panel]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       fetchOrderPrecheck()
-    }, 250)
+    }, isStockAsset ? 800 : 250)
 
     return () => window.clearTimeout(timeoutId)
-  }, [exchange, symbol, side, orderType, price, quantity, brokerEnv])
+  }, [exchange, symbol, side, orderType, price, quantity, brokerEnv, isStockAsset])
 
-  // 3. TradingView Lightweight Charts 차트 드로잉 및 리사이즈 대응
+  // 3. TradingView Lightweight Charts 차트 초기 생성 및 리사이즈 대응
   useEffect(() => {
-    if (!chartContainerRef.current || candleData.length === 0) return
-
-    if (chartRef.current) {
-      try {
-        chartRef.current.remove()
-      } catch (e) {
-        console.error('기존 차트 정리 에러:', e)
-      }
-      chartRef.current = null
-    }
-
-    if (chartContainerRef.current) {
-      chartContainerRef.current.innerHTML = ''
-    }
+    if (!chartContainerRef.current || chartRef.current) return
 
     try {
-      const containerWidth = chartContainerRef.current.clientWidth || chartContainerRef.current.parentElement?.clientWidth || 800;
+      const containerWidth = chartContainerRef.current.clientWidth || chartContainerRef.current.parentElement?.clientWidth || 800
 
       const chart = createChart(chartContainerRef.current, {
         layout: {
           background: { type: 'solid', color: '#0e1529' }, // Obsidian Navy 테마
           textColor: '#94a3b8',
           fontSize: 11,
+        },
+        localization: {
+          locale: 'ko-KR',
+          timeFormatter: (time) => {
+            if (typeof time === 'number') {
+              return formatChartDateTime(time)
+            }
+            if (typeof time === 'string') {
+              return time
+            }
+            return ''
+          },
         },
         grid: {
           vertLines: { color: 'rgba(31, 41, 69, 0.4)' },
@@ -634,9 +716,10 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
           borderColor: '#1f2945',
           timeVisible: true,
           secondsVisible: false,
+          tickMarkFormatter: (time) => formatChartTick(time),
         },
         width: containerWidth,
-        height: 380,
+        height: 460,
       })
 
       const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -647,20 +730,13 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         wickDownColor: '#3b82f6',
       })
 
-      candleSeries.setData(candleData)
-      try {
-        chart.timeScale().fitContent()
-      } catch (fitErr) {
-        console.error('동기 fitContent 에러:', fitErr)
-      }
-      
       chartRef.current = chart
       candleSeriesRef.current = candleSeries
 
       const handleResize = () => {
         if (chartRef.current && chartContainerRef.current) {
           try {
-            const newWidth = chartContainerRef.current.clientWidth || 800;
+            const newWidth = chartContainerRef.current.clientWidth || 800
             chartRef.current.applyOptions({ width: newWidth })
           } catch (err) {
             console.error('차트 리사이즈 조절 에러:', err)
@@ -672,9 +748,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
 
       setTimeout(() => {
         if (chartRef.current && chartContainerRef.current) {
-          const fitWidth = chartContainerRef.current.clientWidth || 800;
-          chartRef.current.applyOptions({ width: fitWidth });
-          chartRef.current.timeScale().fitContent();
+          const fitWidth = chartContainerRef.current.clientWidth || 800
+          chartRef.current.applyOptions({ width: fitWidth })
         }
       }, 50)
 
@@ -686,6 +761,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
           console.error('차트 소멸 정리 에러:', e)
         }
         chartRef.current = null
+        candleSeriesRef.current = null
+        hasAppliedInitialFitRef.current = false
         if (chartContainerRef.current) {
           chartContainerRef.current.innerHTML = ''
         }
@@ -693,9 +770,25 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     } catch (err) {
       console.error('TradingView 차트 생성 치명적 에러:', err)
     }
+  }, [])
+
+  // 4. 차트 데이터만 갱신하고 초기 1회만 fitContent 적용
+  useEffect(() => {
+    if (!candleData.length || !chartRef.current || !candleSeriesRef.current) return
+
+    try {
+      candleSeriesRef.current.setData(candleData)
+
+      if (!hasAppliedInitialFitRef.current) {
+        chartRef.current.timeScale().fitContent()
+        hasAppliedInitialFitRef.current = true
+      }
+    } catch (err) {
+      console.error('차트 데이터 갱신 실패:', err)
+    }
   }, [candleData])
 
-  // 4. 수동 주문 제출 핸들러
+  // 5. 수동 주문 제출 핸들러
   const handlePlaceOrder = async (e) => {
     e.preventDefault()
     setSubmitting(true)
@@ -764,8 +857,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       const resData = await response.json()
 
       if (resData.success) {
+        const autoExitMessage = resData.auto_exit ? ` / ${resData.auto_exit}` : ''
         setTradeMessage({
-          text: `주문이 성공적으로 전송되었습니다! 주문번호: ${resData.order_id || 'MOCK'}`,
+          text: `주문이 성공적으로 전송되었습니다! 주문번호: ${resData.order_id || 'MOCK'}${autoExitMessage}`,
           isError: false
         })
         setQuantity('')
@@ -787,7 +881,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   }
 
   // 보유 주식 필터링
-  const myHolding = userBalance?.holdings?.find(h => h.symbol.toUpperCase() === symbol.toUpperCase() || symbol.toUpperCase().includes(h.symbol.toUpperCase()));
+  const normalizedCurrentSymbol = normalizeHoldingSymbol(symbol)
+  const myHolding = userBalance?.holdings?.find((holding) => {
+    const normalizedHoldingSymbol = normalizeHoldingSymbol(holding.symbol)
+    return (
+      normalizedHoldingSymbol === normalizedCurrentSymbol ||
+      normalizedCurrentSymbol.includes(normalizedHoldingSymbol) ||
+      normalizedHoldingSymbol.includes(normalizedCurrentSymbol)
+    )
+  });
   const overallFeedStatus = getOverallFeedStatus()
   const isOrderBlocked = brokerEnv === 'REAL' && (
     orderPrecheck?.exceeds_real_order_limit ||
@@ -827,7 +929,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
               {displayName !== symbol ? `${displayName} (${symbol})` : symbol} <span className="text-xs text-slate-400 font-normal">({resolvedAssetType === 'STOCK' ? '주식' : '가상자산'})</span>
             </h1>
             <p className="mt-2 text-[10px] text-slate-500 font-mono">
-              차트 {marketFeeds.candles.source} · 호가 {marketFeeds.orderbook.source} · 체결 {marketFeeds.trades.source}
+              {showLevel2Panel
+                ? `차트 ${marketFeeds.candles.source} · 호가 ${marketFeeds.orderbook.source} · 체결 ${marketFeeds.trades.source}`
+                : `차트 ${marketFeeds.candles.source} · 호가/체결 비활성화`}
             </p>
             {feedReasonSummary ? (
               <p className="mt-1 text-[10px] text-amber-300/80 font-mono">
@@ -871,8 +975,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
             {/* 거래대금 또는 거래소 추가 메타 정보 */}
             <div className="flex flex-col text-right">
               <span className="text-[10px] text-slate-400 font-bold">체결강도</span>
-              <span className="text-sm font-mono text-emerald-400 font-bold mt-0.5">
-                {marketFeeds.orderbook.isMock ? '112.4%' : '124.93%'}
+              <span className="text-sm font-mono text-slate-500 font-bold mt-0.5">
+                {showLevel2Panel ? (marketFeeds.orderbook.isMock ? '112.4%' : '124.93%') : '-'}
               </span>
             </div>
           </div>
@@ -882,7 +986,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           
           {/* [1열: 좌측 - 차트 및 요약 뉴스 탭 (6/12 cols)] */}
-          <div className="lg:col-span-6 flex flex-col gap-5">
+          <div className={`${showLevel2Panel ? 'lg:col-span-6' : 'lg:col-span-9'} flex flex-col gap-5`}>
             
             {/* 차트 카드 */}
             <div className="bg-[#0e1529]/90 border border-[#1f2945] rounded-xl p-4 flex flex-col gap-4 backdrop-blur-md">
@@ -947,7 +1051,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
               </div>
 
               {/* 차트 영역 */}
-              <div className="w-full relative min-h-[380px] bg-[#0e1529] rounded-lg overflow-hidden border border-[#1f2945]/60">
+              <div className="w-full relative min-h-[460px] bg-[#0e1529] rounded-lg overflow-hidden border border-[#1f2945]/60">
                 {loadingChart && (
                   <div className="absolute inset-0 flex items-center justify-center bg-[#0e1529]/95 z-10 rounded">
                     <span className="text-xs text-cyan-400 font-mono animate-pulse">시세 차트 로드 중...</span>
@@ -1031,90 +1135,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
             </div>
           </div>
 
-          {/* [2열: 가운데 - 호가 및 실시간 체결가 (3/12 cols)] */}
-          <div className="lg:col-span-3 flex flex-col gap-5">
-            
-            {/* 호가창 카드 */}
-            <div className="bg-[#0e1529]/90 border border-[#1f2945] rounded-xl p-4 flex flex-col gap-3 backdrop-blur-md">
-              <div className="flex items-center gap-2 border-b border-[#1f2945] pb-2">
-                <span className="w-1.5 h-3 bg-red-400 rounded-full" />
-                <span className="text-xs font-bold text-white">실시간 호가 정보</span>
-              </div>
-
-              {/* 호가 목록 컨테이너 */}
-              <div className="flex flex-col text-xs font-mono select-none">
-                {/* 1. 매도 호가 (Asks) - 오름차순의 역순(높은 가격이 위로 가도록) */}
-                {[...(orderbook?.asks || [])].reverse().map((ask, idx) => {
-                  const maxAskSize = Math.max(...(orderbook?.asks.map(a => a.size) || [1]));
-                  const pct = (ask.size / maxAskSize) * 100;
-                  return (
-                    <div 
-                      key={`ask-${idx}`}
-                      onClick={() => handlePriceClick(ask.price)}
-                      className="flex justify-between items-center py-1.5 px-2 hover:bg-blue-950/30 cursor-pointer border-b border-[#1f2945]/20 relative"
-                    >
-                      {/* 가로 막대 백그라운드 그래프 */}
-                      <div className="absolute right-0 top-0 bottom-0 bg-[#3b82f6]/10 opacity-70 transition-all" style={{ width: `${pct}%` }} />
-                      
-                      <span className="text-blue-400 z-10">{ask.price.toLocaleString()}</span>
-                      <span className="text-slate-400 z-10 text-[10px]">{ask.size.toLocaleString()}</span>
-                    </div>
-                  )
-                })}
-
-                {/* 2. 현재가 중심 표시 */}
-                <div className="bg-[#1f2945]/50 border-y border-[#1f2945] py-2 px-3 text-center my-1.5 flex justify-between items-center font-bold">
-                  <span className="text-slate-400 text-[10px]">현재가</span>
-                  <span className={`text-sm ${priceChangeRate >= 0 ? 'text-[#ef4444]' : 'text-[#3b82f6]'}`}>
-                    {currentPrice.toLocaleString()}
-                  </span>
-                </div>
-
-                {/* 3. 매수 호가 (Bids) - 내림차순 */}
-                {(orderbook?.bids || []).map((bid, idx) => {
-                  const maxBidSize = Math.max(...(orderbook?.bids.map(b => b.size) || [1]));
-                  const pct = (bid.size / maxBidSize) * 100;
-                  return (
-                    <div 
-                      key={`bid-${idx}`}
-                      onClick={() => handlePriceClick(bid.price)}
-                      className="flex justify-between items-center py-1.5 px-2 hover:bg-red-950/20 cursor-pointer border-b border-[#1f2945]/20 relative"
-                    >
-                      {/* 가로 막대 백그라운드 그래프 */}
-                      <div className="absolute right-0 top-0 bottom-0 bg-[#ef4444]/10 opacity-70 transition-all" style={{ width: `${pct}%` }} />
-                      
-                      <span className="text-red-400 z-10">{bid.price.toLocaleString()}</span>
-                      <span className="text-slate-400 z-10 text-[10px]">{bid.size.toLocaleString()}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* 실시간 체결 기록 */}
-            <div className="bg-[#0e1529]/90 border border-[#1f2945] rounded-xl p-4 flex flex-col gap-3 backdrop-blur-md">
-              <div className="flex items-center gap-2 border-b border-[#1f2945] pb-2">
-                <span className="w-1.5 h-3 bg-cyan-400 rounded-full" />
-                <span className="text-xs font-bold text-white">실시간 체결</span>
-              </div>
-
-              <div className="flex flex-col gap-2 max-h-[180px] overflow-y-auto font-mono text-[10px] pr-1">
-                {trades.map((t, idx) => (
-                  <div key={idx} className="flex justify-between items-center py-1 border-b border-[#1f2945]/30">
-                    <span className="text-slate-500">{t.time}</span>
-                    <span className={t.side === 'BUY' ? 'text-[#ef4444]' : 'text-[#3b82f6]'}>
-                      {t.price.toLocaleString()}
-                    </span>
-                    <span className="text-slate-300 font-bold">{t.qty} 주</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-          </div>
-
           {/* [3열: 우측 - 주문 패널 & 내 보유 주식 (3/12 cols)] */}
-          <div className="lg:col-span-3 flex flex-col gap-5">
+          <div className={`${showLevel2Panel ? 'lg:col-span-3' : 'lg:col-span-3'} flex flex-col gap-5`}>
             
             {/* 주문 입력 폼 카드 */}
             <div className="bg-[#0e1529]/90 border border-[#1f2945] rounded-xl p-4 flex flex-col gap-4 backdrop-blur-md">
@@ -1319,30 +1341,35 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                         onChange={(e) => setAutoExit(e.target.checked)}
                         className="accent-cyan-400 rounded"
                       />
-                      체결 시 자동 감시 조건 등록
+                      주문 전송 후 자동 감시 조건 등록
                     </label>
 
                     {autoExit && (
-                      <div className="grid grid-cols-2 gap-2 bg-[#070b19] border border-[#1f2945] rounded p-2.5">
-                        <div className="flex flex-col gap-1">
-                          <label className="text-[9px] font-bold text-green-400">목표 익절 (%)</label>
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={targetProfitRate}
-                            onChange={(e) => setTargetProfitRate(e.target.value)}
-                            className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
-                          />
+                      <div className="flex flex-col gap-2">
+                        <div className="rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1.5 text-[9px] leading-relaxed text-amber-300">
+                          현재 구현은 주문 체결 확정 이후가 아니라 주문 전송 성공 직후 감시 규칙을 등록합니다.
                         </div>
-                        <div className="flex flex-col gap-1">
-                          <label className="text-[9px] font-bold text-red-400">손실 제한 (%)</label>
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={stopLossRate}
-                            onChange={(e) => setStopLossRate(e.target.value)}
-                            className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
-                          />
+                        <div className="grid grid-cols-2 gap-2 bg-[#070b19] border border-[#1f2945] rounded p-2.5">
+                          <div className="flex flex-col gap-1">
+                            <label className="text-[9px] font-bold text-green-400">목표 익절 (%)</label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={targetProfitRate}
+                              onChange={(e) => setTargetProfitRate(e.target.value)}
+                              className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-[9px] font-bold text-red-400">손실 제한 (%)</label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={stopLossRate}
+                              onChange={(e) => setStopLossRate(e.target.value)}
+                              className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
+                            />
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1410,12 +1437,16 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                     </span>
                   </div>
                 </div>
+              ) : balanceMessage ? (
+                <div className="rounded border border-amber-900/50 bg-amber-950/20 px-3 py-3 text-[11px] leading-relaxed text-amber-300">
+                  {balanceMessage}
+                </div>
               ) : (
                 <div className="flex flex-col items-center justify-center py-6 text-slate-500 text-xs">
                   <svg className="w-8 h-8 text-slate-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0a2 2 0 01-2 2H6a2 2 0 01-2-2m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-4M4 13h4" />
                   </svg>
-                  <span>{symbol} 주식을 보유하고 있지 않아요</span>
+                  <span>{symbol} 종목은 현재 선택한 계좌에서 보유하지 않고 있어요</span>
                 </div>
               )}
             </div>
