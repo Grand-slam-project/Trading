@@ -1,5 +1,6 @@
 import re
 import time
+import threading
 import requests
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
@@ -13,8 +14,22 @@ CANDLE_CACHE = {}
 ORDERBOOK_CACHE = {}
 TRADES_CACHE = {}
 CACHE_TTL_SECONDS = 10  # 10초 유효
-LEVEL2_CACHE_TTL_SECONDS = 3
+LEVEL2_CACHE_TTL_SECONDS = 10
 REAL_ORDER_LIMIT_KRW = 100000.0
+
+# API 호출 동시성 제어를 위한 Lock 딕셔너리 (Request Collapsing용)
+_api_locks = {}
+_api_locks_lock = threading.Lock()
+
+def _get_api_lock(cache_key):
+    """
+    동일한 캐시 키로 들어오는 동시 호출을 제어하기 위해 락을 반환합니다.
+    """
+    with _api_locks_lock:
+        if cache_key not in _api_locks:
+            _api_locks[cache_key] = threading.Lock()
+        return _api_locks[cache_key]
+
 
 trade_bp = Blueprint("trade", __name__)
 
@@ -520,8 +535,7 @@ def place_manual_order():
             "market_country": market_country,
             "currency": currency,
             "external_order_id": order_res.get("order_id"),
-            "status": "EXECUTED",
-            "created_at": datetime.now().isoformat()
+            "status": "EXECUTED"
         }
         query_supabase(auth_header, "trade_proposals", "POST", json_data=proposal_data)
     except Exception as e:
@@ -569,7 +583,29 @@ def get_chart_candles():
                 }
             })
 
+    # 캐시 미스 시 동시 요청 제어를 위해 Lock 획득 후 Double-checked locking 진행
+    lock = _get_api_lock(cache_key)
+    with lock:
+        now = time.time()
+        if cache_key in CANDLE_CACHE:
+            expire_time, cached_data = CANDLE_CACHE[cache_key]
+            if now < expire_time:
+                return jsonify({
+                    "success": True,
+                    "data": cached_data,
+                    "meta": {
+                        "source": "CACHE",
+                        "is_mock": False,
+                        "cache_ttl_seconds": CACHE_TTL_SECONDS,
+                    }
+                })
+
+        return _fetch_candles_uncached(cache_key, exchange, symbol, interval, count, broker_env, auth_header)
+
+
+def _fetch_candles_uncached(cache_key, exchange, symbol, interval, count, broker_env, auth_header):
     try:
+
         # 1. TOSS 캔들
         if exchange == "TOSS":
             if not auth_header:
@@ -869,7 +905,6 @@ def get_orderbook_api():
         return jsonify({"success": False, "message": "exchange 및 symbol 파라미터가 필수적입니다."}), 400
 
     auth_header = request.headers.get("Authorization")
-    degraded_reasons = []
     cache_key = (exchange, symbol, broker_env)
     cached_orderbook = _get_cached_level2_snapshot(ORDERBOOK_CACHE, cache_key)
     if cached_orderbook is not None:
@@ -882,12 +917,33 @@ def get_orderbook_api():
                 "cache_ttl_seconds": LEVEL2_CACHE_TTL_SECONDS,
             }
         })
+
+    # 캐시 미스 시 동시 요청 제어를 위해 Lock 획득 후 Double-checked locking 진행
+    lock = _get_api_lock(cache_key)
+    with lock:
+        cached_orderbook = _get_cached_level2_snapshot(ORDERBOOK_CACHE, cache_key)
+        if cached_orderbook is not None:
+            return jsonify({
+                "success": True,
+                "data": cached_orderbook,
+                "meta": {
+                    "source": "CACHE",
+                    "is_mock": False,
+                    "cache_ttl_seconds": LEVEL2_CACHE_TTL_SECONDS,
+                }
+            })
+
+        return _fetch_orderbook_uncached(cache_key, exchange, symbol, broker_env, auth_header)
+
+
+def _fetch_orderbook_uncached(cache_key, exchange, symbol, broker_env, auth_header):
+    degraded_reasons = []
     
     # 기본 Mock 기준 가격 조회 시도 (캐시된 캔들 종가가 존재한다면 동적으로 보정)
     base_price = 150000  # 디폴트
     cached_close = None
-    for cache_key, (expire, candles) in CANDLE_CACHE.items():
-        if len(cache_key) >= 4 and cache_key[1].upper() == symbol.upper() and candles:
+    for cache_key_candle, (expire, candles) in CANDLE_CACHE.items():
+        if len(cache_key_candle) >= 4 and cache_key_candle[1].upper() == symbol.upper() and candles:
             cached_close = candles[-1]["close"]
             break
             
@@ -898,6 +954,7 @@ def get_orderbook_api():
         pass
     
     try:
+
         # 1. COINONE 호가 조회
         if exchange == "COINONE":
             url = f"https://api.coinone.co.kr/public/v2/orderbook/KRW/{symbol.upper()}"
@@ -1175,8 +1232,6 @@ def get_trades_api():
         return jsonify({"success": False, "message": "exchange 및 symbol 파라미터가 필수적입니다."}), 400
 
     auth_header = request.headers.get("Authorization")
-    degraded_reasons = []
-    
     cache_key = (exchange, symbol, broker_env)
     cached_trades = _get_cached_level2_snapshot(TRADES_CACHE, cache_key)
     if cached_trades is not None:
@@ -1190,11 +1245,32 @@ def get_trades_api():
             }
         })
 
+    # 캐시 미스 시 동시 요청 제어를 위해 Lock 획득 후 Double-checked locking 진행
+    lock = _get_api_lock(cache_key)
+    with lock:
+        cached_trades = _get_cached_level2_snapshot(TRADES_CACHE, cache_key)
+        if cached_trades is not None:
+            return jsonify({
+                "success": True,
+                "data": cached_trades,
+                "meta": {
+                    "source": "CACHE",
+                    "is_mock": False,
+                    "cache_ttl_seconds": LEVEL2_CACHE_TTL_SECONDS,
+                }
+            })
+
+        return _fetch_trades_uncached(cache_key, exchange, symbol, broker_env, auth_header)
+
+
+def _fetch_trades_uncached(cache_key, exchange, symbol, broker_env, auth_header):
+    degraded_reasons = []
+    
     # 기본 Mock 기준 가격 조회 시도 (캐시된 캔들 종가가 존재한다면 동적으로 보정)
     base_price = 150000
     cached_close = None
-    for cache_key, (expire, candles) in CANDLE_CACHE.items():
-        if len(cache_key) >= 4 and cache_key[1].upper() == symbol.upper() and candles:
+    for cache_key_candle, (expire, candles) in CANDLE_CACHE.items():
+        if len(cache_key_candle) >= 4 and cache_key_candle[1].upper() == symbol.upper() and candles:
             cached_close = candles[-1]["close"]
             break
             
@@ -1205,6 +1281,7 @@ def get_trades_api():
         pass
     
     try:
+
         # 1. COINONE 체결 조회
         if exchange == "COINONE":
             url = f"https://api.coinone.co.kr/public/v2/trades/KRW/{symbol.upper()}"

@@ -23,17 +23,17 @@ def get_keys_status():
         records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
         
         result = {
-            "TOSS": {"registered": False},
-            "KIS": {"registered": False},
-            "KIS_MOCK": {"registered": False},
-            "KIS_REAL": {"registered": False},
-            "COINONE": {"registered": False},
-            "BINANCE": {"registered": False}
+            "TOSS": {"registered": False, "accounts": []},
+            "KIS": {"registered": False, "accounts": []},
+            "COINONE": {"registered": False, "accounts": []},
+            "BINANCE": {"registered": False, "accounts": []}
         }
         
         crypto_helper = current_app.crypto
         for record in records:
-            ex = record.get("exchange")
+            ex = str(record.get("exchange") or "").upper()
+            if ex not in result:
+                continue
                 
             enc_key = record.get("encrypted_access_key")
             mask_key = ""
@@ -56,22 +56,21 @@ def get_keys_status():
             if kis_acc and len(kis_acc) > 4:
                 kis_acc = f"****{kis_acc[-4:]}"
 
-            status_data = {
+            broker_env = str(record.get("broker_env") or "REAL").upper()
+            account_status = {
                 "registered": True,
                 "access_key": mask_key,
-                "broker_env": record.get("broker_env", "REAL"),
+                "broker_env": broker_env,
                 "toss_account_no": toss_acc,
                 "toss_account_seq": record.get("toss_account_seq"),
                 "kis_account_no": kis_acc
             }
 
-            if ex == "KIS":
-                env = record.get("broker_env", "REAL")
-                result[f"KIS_{env}"] = status_data
-                result["KIS"] = status_data
-            else:
-                if ex in result:
-                    result[ex] = status_data
+            result[ex]["registered"] = True
+            result[ex]["accounts"].append(account_status)
+
+            if "broker_env" not in result[ex]:
+                result[ex].update(account_status)
             
         return jsonify({"success": True, "data": result})
     except Exception as e:

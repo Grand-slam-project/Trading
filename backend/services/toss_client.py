@@ -10,6 +10,16 @@ KST = timezone(timedelta(hours=9))
 
 TOSS_TOKEN_CACHE_FILE = ".toss_token_cache.json"
 
+
+def _floor_kst_bucket_timestamp(timestamp: int, interval_minutes: int) -> int:
+    """
+    유닉스 타임스탬프를 한국시간 기준 캔들 시작 시각으로 내림 정렬합니다.
+    """
+    dt_kst = datetime.fromtimestamp(timestamp, tz=KST)
+    bucket_minute = (dt_kst.minute // interval_minutes) * interval_minutes
+    bucket_dt = dt_kst.replace(minute=bucket_minute, second=0, microsecond=0)
+    return int(bucket_dt.timestamp())
+
 class TossClient(ExchangeClient):
     """
     토스증권 Open API 연동 및 연결 검증을 담당하는 클라이언트 클래스입니다.
@@ -573,14 +583,13 @@ class TossClient(ExchangeClient):
             if not raw_candles:
                 return []
 
-            interval_seconds = interval_minutes * 60
             buckets = {}
             for c in raw_candles:
                 try:
                     ts = int(c["time"])
                 except (ValueError, TypeError):
                     continue
-                bucket_ts = (ts // interval_seconds) * interval_seconds
+                bucket_ts = _floor_kst_bucket_timestamp(ts, interval_minutes)
                 if bucket_ts not in buckets:
                     buckets[bucket_ts] = []
                 buckets[bucket_ts].append(c)
