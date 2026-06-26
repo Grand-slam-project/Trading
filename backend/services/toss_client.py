@@ -3,12 +3,15 @@ import json
 import time
 import uuid
 import requests
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from backend.services.exchange_client import ExchangeClient
 
 KST = timezone(timedelta(hours=9))
 
-TOSS_TOKEN_CACHE_FILE = ".toss_token_cache.json"
+# 토큰 캐시 파일을 toss_client.py 기준 절대경로로 고정 (Flask 실행 위치에 무관)
+_THIS_DIR = Path(__file__).resolve().parent.parent  # backend/
+TOSS_TOKEN_CACHE_FILE = str(_THIS_DIR / ".toss_token_cache.json")
 
 
 def _floor_kst_bucket_timestamp(timestamp: int, interval_minutes: int) -> int:
@@ -189,39 +192,44 @@ class TossClient(ExchangeClient):
             err = data["error"]
             raise Exception(f"토스 보유자산 조회 에러 [{err.get('code')}]: {err.get('message')}")
 
+        # 실제 Toss API 응답 구조:
+        # result.marketValue.amount.usd  → 총 평가금액 (USD)
+        # result.items[]                 → 보유 종목 목록
+        #   .symbol, .name, .quantity, .lastPrice, .averagePurchasePrice
+        #   .profitLoss.amount, .profitLoss.rate
         result = data.get("result", {})
         holdings_list = []
-        raw_holdings = []
-        if isinstance(result, dict):
-            raw_holdings = result.get("holdings", [])
-        elif isinstance(result, list):
-            raw_holdings = result
 
+        # 총 평가금액: USD 기준 (해외주식은 krw=0이므로 usd 우선)
         total_eval = 0.0
-        available_cash = 0.0
+        try:
+            mv = result.get("marketValue", {}).get("amount", {})
+            usd_val = float(mv.get("usd", 0) or 0)
+            krw_val = float(mv.get("krw", 0) or 0)
+            total_eval = usd_val if usd_val > 0 else krw_val
+        except (ValueError, TypeError):
+            pass
 
-        if isinstance(result, dict):
-            try:
-                total_eval = float(result.get("totalEvaluationAmount", 0.0))
-                available_cash = float(result.get("availableCash", 0.0))
-            except (ValueError, TypeError):
-                pass
+        # 보유 종목: 실제 필드명은 `items` (기존 `holdings` 아님)
+        raw_items = result.get("items", []) if isinstance(result, dict) else []
+        if not raw_items and isinstance(result, list):
+            raw_items = result
 
-        for stock in raw_holdings:
-            symbol = stock.get("symbol", "")
-            name = stock.get("name", "")
+        for item in raw_items:
+            symbol = item.get("symbol", "")
+            name = item.get("name", "")
+            currency = item.get("currency", "USD")
             try:
-                qty = float(stock.get("quantity", 0.0))
-                avg_price = float(stock.get("averageBuyPrice", 0.0))
-                current_price = float(stock.get("currentPrice", 0.0))
-                profit = float(stock.get("evaluationProfitLoss", 0.0))
-                profit_rate = float(stock.get("evaluationProfitLossRate", 0.0))
+                qty = float(item.get("quantity", 0) or 0)
+                avg_price = float(item.get("averagePurchasePrice", 0) or 0)
+                current_price = float(item.get("lastPrice", 0) or 0)
+                pl = item.get("profitLoss", {})
+                profit = float(pl.get("amount", 0) or 0)
+                profit_rate = float(pl.get("rate", 0) or 0)
+                mv_item = item.get("marketValue", {})
+                eval_amount = float(mv_item.get("amount", 0) or 0)
             except (ValueError, TypeError):
-                qty = 0.0
-                avg_price = 0.0
-                current_price = 0.0
-                profit = 0.0
-                profit_rate = 0.0
+                qty = avg_price = current_price = profit = profit_rate = eval_amount = 0.0
 
             if qty <= 0:
                 continue
@@ -233,18 +241,18 @@ class TossClient(ExchangeClient):
                 "avg_price": avg_price,
                 "current_price": current_price,
                 "profit": profit,
-                "profit_rate": profit_rate
+                "profit_rate": profit_rate,
+                "eval_amount": eval_amount,
+                "currency": currency,
             })
 
-            if total_eval == 0.0:
-                total_eval += current_price * qty
-
+        # 총 평가금액이 0이면 items 합산으로 보정
         if total_eval == 0.0:
-            total_eval = available_cash
+            total_eval = sum(h["eval_amount"] for h in holdings_list)
 
         return {
             "total_evaluation": total_eval,
-            "available_cash": available_cash,
+            "available_cash": 0.0,  # holdings API에 예수금 미포함
             "holdings": holdings_list
         }
 
