@@ -1,8 +1,11 @@
-import { useState } from 'react'
-import { TRADE_HISTORY_MOCK } from '../dashboardConstants.js'
+import { useState, useEffect } from 'react'
+import { supabase } from '../supabaseClient' // 경로 확인
+// import { TRADE_HISTORY_MOCK } from '../dashboardConstants.js'
 
 export default function TradeHistoryTab() {
-  const tradeHistory = TRADE_HISTORY_MOCK
+  // const tradeHistory = TRADE_HISTORY_MOCK
+  const [tradeHistory, setTradeHistory] = useState([])
+  const [loading, setLoading] = useState(true);
   const [selectedTrade, setSelectedTrade] = useState(null)
   const [selectedExchange, setSelectedExchange] = useState('ALL')
   const [tradeSearchQuery, setTradeSearchQuery] = useState('')
@@ -17,7 +20,7 @@ export default function TradeHistoryTab() {
     TOSS: 'border-blue-500/40 bg-blue-500/15 text-blue-300',
     KIS: 'border-rose-500/40 bg-rose-500/15 text-rose-300',
     COINONE: 'border-sky-500/40 bg-sky-500/15 text-sky-300',
-    BINANCE: 'border-yellow-400/40 bg-yellow-400/15 text-yellow-300',
+    BINANCE: 'border-yellow-400/40 bg-yellow-400/15 text-yellow-300', 
   }
   const filteredTrades = tradeHistory.filter((trade) => {
     const query = tradeSearchQuery.trim().toLowerCase()
