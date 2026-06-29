@@ -1,7 +1,11 @@
 import threading
 import time
 
-from backend.services.market_index_service import collect_market_index_rows, is_korean_market_open
+from backend.services.market_index_service import (
+    collect_market_index_rows,
+    is_korean_market_open,
+    set_market_index_cache,
+)
 
 
 def start_market_index_scheduler(
@@ -22,11 +26,17 @@ def start_market_index_scheduler(
             try:
                 rows, errors = collect_market_index_rows()
                 if rows:
+                    # 새로 수집한 최신값을 메모리 캐시와 DB에 동시에 반영한다.
+                    # 메모리는 즉시 응답용이고 DB는 재시작 후 복구용이라 둘 다 갱신해야 한다.
+                    set_market_index_cache(rows)
                     market_index_repository.upsert_latest(rows)
                 print(
                     "[MarketIndexScheduler] "
                     f"updated={len(rows)} errors={len(errors)} next={interval}s"
                 )
+                # 에러 상세 내용 출력 (원인 추적용)
+                for err in errors:
+                    print(f"[MarketIndexScheduler] 수집 실패 symbol={err.get('symbol')} reason={err.get('message')}")
             except Exception as error:
                 print(f"[MarketIndexScheduler] update failed: {error}")
 

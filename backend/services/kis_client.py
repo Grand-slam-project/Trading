@@ -45,19 +45,27 @@ class KISClient(ExchangeClient):
         self.acnt_prdt_cd = acnt_prdt_cd
         self.env = env.upper()
         self.user_id = user_id
-        self._memory_token = None
-        self._memory_token_expires_at = None
+        # 마지막 토큰 조회 결과를 기록해 상위 로직에서 캐시 상태를 함께 볼 수 있게 한다.
+        # 이 정보는 "왜 지금은 재사용인지 / 재발급인지"를 로그와 응답에서 구분할 때 쓰인다.
+        self._last_token_cache_info = {
+            "source": "token_cache_service",
+            "cacheStatus": "MISS",
+            "tokenStatus": "REFRESHED",
+            "errorMessage": None,
+        }
         
         if self.env == "REAL":
             self.base_url = "https://openapi.koreainvestment.com:9443"
             self.balance_tr_id = "TTTC8434R"
             self.buy_tr_id = "TTTC0802U"
             self.sell_tr_id = "TTTC0801U"
+            self.modify_cancel_tr_id = "TTTC0803U"
         else:
             self.base_url = "https://openapivts.koreainvestment.com:29443"
             self.balance_tr_id = "VTTC8434R"
             self.buy_tr_id = "VTTC0802U"
             self.sell_tr_id = "VTTC0801U"
+            self.modify_cancel_tr_id = "VTTC0803U"
 
     def _clear_token_cache(self):
         """
@@ -69,20 +77,34 @@ class KISClient(ExchangeClient):
         except Exception:
             pass
 
+    def get_token_cache_info(self) -> dict:
+        return dict(self._last_token_cache_info)
+
+    def get_access_token(self) -> str:
+        # 외부 호출부는 이 메서드만 쓰면 토큰 획득/갱신 세부사항을 몰라도 된다.
+        # 즉, 토큰 캐시가 있으면 재사용하고 없으면 내부에서 새로 발급한다는 의미다.
+        return self._get_cached_token()
+
     def _get_cached_token(self) -> str:
         """
         Supabase DB의 token_caches 테이블에서 KIS Access Token을 가져옵니다.
         토큰이 만료되었거나 캐시가 없으면 새로 발급을 요청합니다.
         """
-        from backend.services.token_cache_service import get_db_token, set_db_token
+        from backend.services.token_cache_service import get_db_token_with_status, set_db_token
         
         # DB에서 유효한 공용 토큰 획득 시도
-        try:
-            token = get_db_token("KIS", self.env, self.user_id)
-            if token:
-                return token
-        except Exception:
-            pass
+        # 토큰이 아직 남아 있으면 외부 호출을 아끼고, 만료 임박이면 바로 재발급한다.
+        cache_state = get_db_token_with_status("KIS", self.env, self.user_id)
+        self._last_token_cache_info = {
+            "source": "token_cache_service",
+            "cacheStatus": cache_state.get("cache_status", "MISS"),
+            "tokenStatus": cache_state.get("token_status", "REFRESHED"),
+            "errorMessage": cache_state.get("error_message"),
+            "expiredAt": cache_state.get("expired_at"),
+        }
+        token = cache_state.get("token")
+        if token:
+            return token
 
         # 토큰 새로 발급
         token_data = self._request_new_token()
@@ -103,6 +125,13 @@ class KISClient(ExchangeClient):
             set_db_token("KIS", self.env, new_token, expires_in, self.user_id)
         except Exception:
             pass
+        self._last_token_cache_info = {
+            "source": "token_cache_service",
+            "cacheStatus": "MISS",
+            "tokenStatus": "REFRESHED",
+            "errorMessage": cache_state.get("error_message"),
+            "expiredAt": (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat() + "Z",
+        }
             
         return new_token
 
@@ -121,6 +150,218 @@ class KISClient(ExchangeClient):
         if res.status_code != 200:
             raise Exception(f"KIS Token issuance failed: {res.text}")
         return res.json()
+
+    def _get_daily_previous_close(self, symbol: str, count: int = 5) -> dict:
+        try:
+            candles = self.get_candles(symbol, interval="D", count=count)
+        except Exception:
+            candles = []
+
+        if not candles:
+            return {
+                "previous_close": 0.0,
+                "candles": [],
+                "selected_index": None,
+                "today_candle_included": False,
+            }
+
+        today_kst = datetime.now(KST).date().isoformat()
+        normalized = []
+        for candle in candles:
+            candle_time = candle.get("time")
+            candle_date = str(candle_time).split(" ")[0] if candle_time is not None else ""
+            normalized.append({**candle, "date": candle_date})
+
+        today_index = None
+        for index in range(len(normalized) - 1, -1, -1):
+            if normalized[index].get("date") == today_kst:
+                today_index = index
+                break
+
+        # 일봉에 오늘 봉이 포함되면 그 전 봉을 기준값으로 삼는다.
+        if today_index is not None and today_index > 0:
+            selected_index = today_index - 1
+            today_candle_included = True
+        else:
+            selected_index = len(normalized) - 1
+            today_candle_included = False
+
+        selected = normalized[selected_index] if 0 <= selected_index < len(normalized) else normalized[-1]
+        return {
+            "previous_close": float(selected.get("close") or 0.0),
+            "candles": normalized,
+            "selected_index": selected_index,
+            "today_candle_included": today_candle_included,
+        }
+
+    def _build_standard_market_index_row(self, definition: dict, ticker: str, current_price: float, previous_close: float, payload: dict, source: str = "KIS_OPEN_API") -> dict:
+        # 지수 응답은 프론트/저장소 공통 포맷으로 맞춘다.
+        # 여기서 필드명을 통일해두면 API, DB, UI 각각이 따로 계산하지 않아도 된다.
+        change_price = current_price - previous_close if previous_close else 0.0
+        change_rate = ((change_price / previous_close) * 100) if previous_close else 0.0
+        synced_at = datetime.now(timezone.utc).isoformat()
+        return {
+            "symbol": definition["symbol"],
+            "label": definition["label"],
+            "source": source,
+            "market_country": definition["market_country"],
+            "ticker": ticker,
+            "current_price": current_price,
+            "previous_close": previous_close,
+            "change_price": change_price,
+            "change_rate": change_rate,
+            "current_value": current_price,
+            "change_value": change_price,
+            "change_percent": change_rate,
+            "currency": definition["currency"],
+            "display_order": definition["display_order"],
+            "as_of": synced_at,
+            "synced_at": synced_at,
+            "raw_payload": payload,
+        }
+
+    def _build_market_index_row(self, definition: dict, ticker: str, current_price: float, previous_close: float, payload: dict, source: str = "KIS_OPEN_API") -> dict:
+        # 기존 호출부 호환용 alias다.
+        return self._build_standard_market_index_row(definition, ticker, current_price, previous_close, payload, source)
+
+    def get_market_index_snapshot(self, definition: dict) -> dict:
+        if definition["kind"] == "domestic":
+            return self._get_domestic_index_snapshot(definition)
+        if definition["kind"] == "fx":
+            return self._get_fx_index_snapshot(definition)
+        return self._get_overseas_index_snapshot(definition)
+
+    def _get_domestic_index_snapshot(self, definition: dict) -> dict:
+        _enforce_kis_mock_rate_limit(self.env)
+        token = self._get_cached_token()
+        response = requests.get(
+            f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-index-price",
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.appkey,
+                "appsecret": self.appsecret,
+                "tr_id": "FHPUP02100000",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "U",
+                "FID_INPUT_ISCD": definition["code"],
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("rt_cd") != "0":
+            raise RuntimeError(payload.get("msg1") or f"Domestic index lookup failed for {definition['symbol']}")
+
+        output = payload.get("output") or {}
+        previous_close_info = self._get_daily_previous_close(definition["code"])
+        current_price = float(output.get("bstp_nmix_prpr") or 0)
+        previous_close = float(previous_close_info.get("previous_close") or 0.0)
+        change_value = current_price - previous_close if previous_close else 0.0
+        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
+        return self._build_standard_market_index_row(
+            definition,
+            definition["code"],
+            current_price,
+            previous_close,
+            {
+                "quote": payload,
+                "candles": previous_close_info.get("candles") or [],
+                "candleSelection": previous_close_info,
+            },
+        )
+
+    def _get_overseas_index_snapshot(self, definition: dict) -> dict:
+        _enforce_kis_mock_rate_limit(self.env)
+        token = self._get_cached_token()
+        response = requests.get(
+            f"{self.base_url}/uapi/overseas-price/v1/quotations/inquire-time-indexchartprice",
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.appkey,
+                "appsecret": self.appsecret,
+                "tr_id": "FHKST03030200",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "N",
+                "FID_INPUT_ISCD": definition["code"],
+                "FID_HOUR_CLS_CODE": "0",
+                "FID_PW_DATA_INCU_YN": "Y",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("rt_cd") != "0":
+            raise RuntimeError(payload.get("msg1") or f"Overseas index lookup failed for {definition['symbol']}")
+
+        output = payload.get("output1") or {}
+        current_value = float(output.get("ovrs_nmix_prpr") or 0)
+        previous_close_info = self._get_daily_previous_close(definition["code"])
+        previous_close = float(previous_close_info.get("previous_close") or 0.0)
+        change_value = current_value - previous_close if previous_close else 0.0
+        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
+        if current_value == 0 and change_value == 0 and change_percent == 0:
+            raise RuntimeError(f"Overseas index returned empty values for {definition['symbol']}")
+        return self._build_standard_market_index_row(
+            definition,
+            definition["code"],
+            current_value,
+            previous_close,
+            {
+                "quote": payload,
+                "candles": previous_close_info.get("candles") or [],
+                "candleSelection": previous_close_info,
+            },
+        )
+
+    def _get_fx_index_snapshot(self, definition: dict) -> dict:
+        _enforce_kis_mock_rate_limit(self.env)
+        token = self._get_cached_token()
+        response = requests.get(
+            f"{self.base_url}/uapi/overseas-price/v1/quotations/inquire-time-indexchartprice",
+            headers={
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self.appkey,
+                "appsecret": self.appsecret,
+                "tr_id": "FHKST03030200",
+            },
+            params={
+                "FID_COND_MRKT_DIV_CODE": "X",
+                "FID_INPUT_ISCD": definition["code"],
+                "FID_HOUR_CLS_CODE": "0",
+                "FID_PW_DATA_INCU_YN": "Y",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("rt_cd") != "0":
+            raise RuntimeError(payload.get("msg1") or f"FX lookup failed for {definition['symbol']}")
+
+        output = payload.get("output1") or {}
+        current_value = float(output.get("ovrs_nmix_prpr") or 0)
+        previous_close_info = self._get_daily_previous_close(definition["code"])
+        previous_close = float(previous_close_info.get("previous_close") or 0.0)
+        change_value = current_value - previous_close if previous_close else 0.0
+        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
+        if current_value == 0 and change_value == 0 and change_percent == 0:
+            raise RuntimeError(f"FX returned empty values for {definition['symbol']}")
+        return self._build_standard_market_index_row(
+            definition,
+            definition["code"],
+            current_value,
+            previous_close,
+            {
+                "quote": payload,
+                "candles": previous_close_info.get("candles") or [],
+                "candleSelection": previous_close_info,
+            },
+            source="KIS_OPEN_API",
+        )
 
     def get_price(self, symbol: str) -> dict:
         _enforce_kis_mock_rate_limit(self.env)
@@ -415,16 +656,36 @@ class KISClient(ExchangeClient):
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": ""
         }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code != 200:
-            raise Exception(f"KIS get_balance failed: {res.text}")
-            
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            raise Exception(f"KIS get_balance error: {data.get('msg1')}")
-            
-        output1 = data.get("output1", [])
-        output2 = data.get("output2", [])
+        output1 = []
+        output2 = []
+
+        # KIS 잔고 응답은 보유 종목이 많으면 CTX_AREA 토큰으로 나뉘어 내려올 수 있습니다.
+        for _ in range(10):
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code != 200:
+                raise Exception(f"KIS get_balance failed: {res.text}")
+
+            data = res.json()
+            if data.get("rt_cd") != "0":
+                raise Exception(f"KIS get_balance error: {data.get('msg1')}")
+
+            page_output1 = data.get("output1", []) or []
+            page_output2 = data.get("output2", []) or []
+            output1.extend(page_output1)
+            if page_output2:
+                output2 = page_output2
+
+            next_fk100 = str(data.get("ctx_area_fk100") or data.get("CTX_AREA_FK100") or "").strip()
+            next_nk100 = str(data.get("ctx_area_nk100") or data.get("CTX_AREA_NK100") or "").strip()
+            tr_cont = str(res.headers.get("tr_cont") or res.headers.get("Tr_Cont") or "").upper()
+
+            if not next_fk100 and not next_nk100:
+                break
+            if tr_cont and tr_cont not in {"M", "F"}:
+                break
+
+            params["CTX_AREA_FK100"] = next_fk100
+            params["CTX_AREA_NK100"] = next_nk100
         
         holdings = []
         for stock in output1:
@@ -526,14 +787,111 @@ class KISClient(ExchangeClient):
         output = data.get("output", {})
         return {
             "order_id": output.get("ODNO", ""),
+            "order_org_no": output.get("KRX_FWDG_ORD_ORGNO", ""),
             "status": "ORDERED",
             "raw": data
         }
 
+    def _modify_or_cancel_order(
+        self,
+        order_id: str,
+        order_org_no: str = "",
+        action: str = "CANCEL",
+        price: float | None = None,
+        quantity: float | None = None,
+        ord_type: str = "LIMIT",
+    ) -> dict:
+        """
+        KIS 국내주식 주문 정정/취소 요청을 전송합니다.
+        action은 CANCEL 또는 MODIFY를 사용합니다.
+        """
+        _enforce_kis_mock_rate_limit(self.env)
+        if not order_id:
+            raise ValueError("KIS 원주문번호가 필요합니다.")
+
+        action_upper = action.upper()
+        if action_upper not in ("CANCEL", "MODIFY"):
+            raise ValueError("지원하지 않는 KIS 주문 액션입니다.")
+        if action_upper == "MODIFY" and price is None and quantity is None:
+            raise ValueError("정정할 가격 또는 수량이 필요합니다.")
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl"
+        token = self._get_cached_token()
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": self.appkey,
+            "appsecret": self.appsecret,
+            "tr_id": self.modify_cancel_tr_id,
+        }
+
+        ord_dvsn = "00" if ord_type.upper() == "LIMIT" else "01"
+        order_price = int(price) if price is not None else 0
+        order_qty = int(quantity) if quantity is not None else 0
+
+        payload = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "KRX_FWDG_ORD_ORGNO": order_org_no or "",
+            "ORGN_ODNO": order_id,
+            "ORD_DVSN": ord_dvsn,
+            "RVSE_CNCL_DVSN_CD": "01" if action_upper == "MODIFY" else "02",
+            "ORD_QTY": str(order_qty),
+            "ORD_UNPR": str(order_price),
+            "QTY_ALL_ORD_YN": "Y" if action_upper == "CANCEL" and quantity is None else "N",
+        }
+
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        if res.status_code != 200:
+            raise Exception(f"KIS order {action_upper.lower()} failed: {res.text}")
+
+        data = res.json()
+        if data.get("rt_cd") != "0":
+            raise Exception(f"KIS order {action_upper.lower()} error: {data.get('msg1')}")
+
+        output = data.get("output", {})
+        return {
+            "order_id": output.get("ODNO", order_id),
+            "order_org_no": output.get("KRX_FWDG_ORD_ORGNO", order_org_no or ""),
+            "status": "MODIFIED" if action_upper == "MODIFY" else "CANCELED",
+            "raw": data,
+        }
+
+    def cancel_order(self, order_id: str, order_org_no: str = "", quantity: float | None = None) -> dict:
+        """
+        KIS 국내주식 미체결 주문을 취소합니다.
+        """
+        return self._modify_or_cancel_order(
+            order_id=order_id,
+            order_org_no=order_org_no,
+            action="CANCEL",
+            quantity=quantity,
+        )
+
+    def modify_order(
+        self,
+        order_id: str,
+        order_org_no: str = "",
+        price: float | None = None,
+        quantity: float | None = None,
+        ord_type: str = "LIMIT",
+    ) -> dict:
+        """
+        KIS 국내주식 미체결 주문을 정정합니다.
+        """
+        return self._modify_or_cancel_order(
+            order_id=order_id,
+            order_org_no=order_org_no,
+            action="MODIFY",
+            price=price,
+            quantity=quantity,
+            ord_type=ord_type,
+        )
+
     def get_order_status(self, order_id: str) -> dict:
         return {
             "order_id": order_id,
-            "status": "EXECUTED",
+            "status": "ORDERED",
             "qty": 0.0,
             "executed_qty": 0.0,
             "raw": {}
