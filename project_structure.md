@@ -50,9 +50,6 @@ backend/
 │   ├── kis_client.py
 │   ├── kis_market_universe.py
 │   ├── lock_service.py
-│   ├── market_index_repository.py
-│   ├── market_index_scheduler.py
-│   ├── market_index_service.py
 │   ├── market_repository.py
 │   ├── market_snapshot_scheduler.py
 │   ├── ml_automation_service.py
@@ -64,7 +61,6 @@ backend/
 │   ├── news_query_planner.py
 │   ├── news_repository.py
 │   ├── news_summary_service.py
-│   ├── portfolio_snapshot_scheduler.py
 │   ├── supabase_client.py
 │   ├── symbol_metadata.py
 │   ├── token_cache_service.py
@@ -87,8 +83,6 @@ backend/
   - 뉴스 수집
   - ML 자동화
   - 홈 마켓 스냅샷
-  - 시장 인덱스 스냅샷
-  - 포트폴리오 스냅샷
 - `routes/`
   - HTTP API 입구
 - `services/`
@@ -100,6 +94,7 @@ backend/
 
 - `agent.py`, `trading_engine.py`는 현재 저장소에 없습니다.
 - 토큰 캐시는 현재 `token_cache_service.py`와 Supabase `token_caches`를 기준으로 보는 것이 맞습니다.
+- `coinone_client.py`는 코인원 잔고/현재가/지정가 주문/미체결 주문 취소를 담당하며, 시장가 주문은 아직 운영 경로가 아닙니다.
 - `upbit_client.py`는 남아 있지만 현재 핵심 운영 경로는 아닙니다.
 
 ## frontend
@@ -120,7 +115,6 @@ frontend/
     ├── assets/
     ├── components/
     │   ├── DashboardComponents.jsx
-    │   ├── GlobalIndexTickerBar.jsx
     │   ├── Header.jsx
     │   ├── InvestmentSurveyModal.jsx
     │   └── SymbolSearch.jsx
@@ -231,3 +225,22 @@ supabase/
 - 실제 파일이 없으면 존재한다고 적지 않습니다.
 - 계획 문서는 `automation_plan.md`처럼 계획 문서로 남기고, 현재 구조 문서와 섞지 않습니다.
 - API, DB, ML 버전은 코드 기준으로 맞추고, 실험 리포트 숫자는 별도 리포트 문서에서만 관리합니다.
+
+---
+
+1. **역할의 명확성**: 파일명만 봐도 해당 코드가 프론트엔드 화면, 백엔드 API Gateway, Toss 통신 로직, DB 마이그레이션 중 영역인지 즉시 식별할 수 있습니다.
+2. **Toss 전환 안정성**: KIS 레거시 구현을 보존하면서 신규 Toss 클라이언트를 별도 모듈로 추가하므로, 기존 기능을 훼손하지 않고 점진적으로 전환할 수 있습니다.
+3. **ML 실험 격리**: `ml/` 디렉토리에서 주식/코인 모델의 학습 데이터, 피처 생성, 모델 학습을 격리하므로 Flask 서비스 코드와 실험 코드가 섞이지 않습니다.
+4. **협업 병목 제거**: 프론트엔드 개발자는 `frontend/` 내부 UI와 Supabase Realtime 구독에 집중하고, 백엔드 개발자는 `backend/` 내부에서 Toss API 스펙과 보안 정책에 맞춰 작업할 수 있습니다.
+5. **배포 편리성**: `Docker` 빌드 시 프론트엔드 도커파일과 백엔드 도커파일을 루트의 서브디렉토리 기준으로 각각 빌드하기 최적화된 구조입니다.
+
+---
+
+## 5. KIS order execution and estimated holdings additions
+
+* `backend/services/kis_client.py`
+  * `get_daily_order_executions()`: KIS domestic stock daily order/execution inquiry.
+  * `get_order_execution_status()`: Normalizes KIS order state into `EXECUTED`, `PARTIALLY_FILLED`, `CANCELED`, `ORDERED`, or `UNKNOWN`.
+* `backend/routes/trade.py`
+  * `POST /api/trade/orders/sync-status`: Syncs KIS DB order records with real KIS execution status, then falls back to balance checks.
+  * `POST /api/trade/estimated-holdings`: Builds DB-estimated holdings from executed `trade_proposals`, enriches stock positions with broker prices, and calculates valuation profit and profit rate.
