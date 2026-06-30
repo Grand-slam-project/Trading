@@ -53,12 +53,12 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
     if (balance) {
       if (account.id === 'krw-stock') {
         if (balance.currency !== 'USD') {
-          val = balance.available_cash || 0
+          val = balance.available_cash ?? null
           currency = balance.currency || 'KRW'
         }
       } else if (account.id === 'usd-stock') {
         if (balance.currency === 'USD') {
-          val = balance.available_cash || 0
+          val = balance.available_cash ?? null
           currency = 'USD'
         }
       }
@@ -66,12 +66,12 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
 
     return {
       ...account,
-      balance: formatCurrency(val, currency),
+      balance: val === null ? '-' : formatCurrency(val, currency),
     }
   })
   const rawHoldings = balance?.holdings?.length
     ? balance.holdings.map((stock) => {
-      const isForeign = /[a-zA-Z]/.test(stock.symbol)
+      const isForeign = /[a-zA-Z]/.test(stock.symbol) && !/^[0-9a-zA-Z]{6,7}$/.test(stock.symbol)
       const stockCurrency = stock.currency || (isForeign ? 'USD' : 'KRW')
       const currentDisplayCurrency = isForeign ? displayCurrency : 'KRW'
       const exchangeName = stock.exchange || stock.account_type || (isForeign ? 'TOSS' : 'KIS')
@@ -86,7 +86,7 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
       }
     })
     : FALLBACK_HOLDINGS.map((stock) => {
-      const isForeign = /[a-zA-Z]/.test(stock.id || stock.symbol || '') || stock.account.includes('해외') || stock.account.includes('코인')
+      const isForeign = (/[a-zA-Z]/.test(stock.id || stock.symbol || '') && !/^[0-9a-zA-Z]{6,7}$/.test(stock.id || stock.symbol || '')) || stock.account.includes('해외') || stock.account.includes('코인')
       const stockCurrency = isForeign ? 'USD' : 'KRW'
       const rawAvg = parseFloat(stock.average.replace(/[^0-9.-]/g, '')) || 0
       const currentDisplayCurrency = isForeign ? displayCurrency : 'KRW'

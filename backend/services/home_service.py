@@ -435,7 +435,17 @@ def split_kis_holdings(holdings: list[dict]) -> tuple[list[dict], list[dict]]:
             "profit_rate": to_float(stock.get("profit_rate")),
         }
 
-        if re.search(r"[A-Za-z]", symbol):
+        # 1. SYMBOL_METADATA 전역 캐시 확인
+        is_foreign = False
+        symbol_upper = symbol.upper()
+        if symbol_upper in SYMBOL_METADATA:
+            is_foreign = SYMBOL_METADATA[symbol_upper].get("market") == "US"
+        else:
+            # 2. 폴백: 6~7자리 영숫자 조합이면 국내(KR), 그 외 알파벳이 섞였으면 해외(US)
+            if re.search(r"[A-Za-z]", symbol_upper) and not re.match(r"^[0-9A-Z]{6,7}$", symbol_upper):
+                is_foreign = True
+
+        if is_foreign:
             foreign.append(row)
         else:
             domestic.append(row)
