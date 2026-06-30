@@ -2,17 +2,21 @@ import os
 import json
 import time
 import threading
+import logging
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from backend.services.exchange_client import ExchangeClient
 
 KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 # KIS 모의투자 API Rate Limiter
 _kis_mock_rate_limiter_lock = threading.Lock()
 _last_kis_mock_request_time = 0.0
 KIS_MOCK_MIN_INTERVAL = 0.5  # 초당 3회 한도 방어를 위해 최소 0.5초 간격 유지
+
+DEFAULT_US_RANK_EXCHANGES = ["NAS", "NYS", "AMS"]
 
 
 def _enforce_kis_mock_rate_limit(env: str):
@@ -52,6 +56,10 @@ class KISClient(ExchangeClient):
             "cacheStatus": "MISS",
             "tokenStatus": "REFRESHED",
             "errorMessage": None,
+        }
+        self._access_token_cache = {
+            "token": None,
+            "expired_at": None,
         }
         
         if self.env == "REAL":
@@ -134,6 +142,115 @@ class KISClient(ExchangeClient):
         }
             
         return new_token
+
+    def _clear_token_cache(self):
+        from backend.services.token_cache_service import clear_db_token
+        try:
+            clear_db_token("KIS", self.env, self.user_id)
+        except Exception:
+            pass
+        self._access_token_cache = {
+            "token": None,
+            "expired_at": None,
+        }
+
+    def _get_cached_token(self) -> str:
+        from backend.services.lock_service import distributed_lock
+        from backend.services.token_cache_service import get_db_token_with_status, set_db_token
+
+        cached_token = self._access_token_cache.get("token")
+        cached_expired_at = self._access_token_cache.get("expired_at")
+        if cached_token and isinstance(cached_expired_at, datetime):
+            if (cached_expired_at - datetime.utcnow()).total_seconds() > 300:
+                self._last_token_cache_info = {
+                    "source": "memory",
+                    "cacheStatus": "HIT",
+                    "tokenStatus": "REUSED",
+                    "errorMessage": None,
+                    "expiredAt": cached_expired_at.isoformat() + "Z",
+                }
+                return cached_token
+
+        cache_state = get_db_token_with_status("KIS", self.env, self.user_id)
+        self._last_token_cache_info = {
+            "source": "token_cache_service",
+            "cacheStatus": cache_state.get("cache_status", "MISS"),
+            "tokenStatus": cache_state.get("token_status", "REFRESHED"),
+            "errorMessage": cache_state.get("error_message"),
+            "expiredAt": cache_state.get("expired_at"),
+        }
+        token = cache_state.get("token")
+        if token:
+            expired_at_raw = cache_state.get("expired_at")
+            try:
+                cached_expired_at = datetime.fromisoformat(str(expired_at_raw).replace("Z", "+00:00")).replace(tzinfo=None) if expired_at_raw else None
+            except Exception:
+                cached_expired_at = None
+            self._access_token_cache = {
+                "token": token,
+                "expired_at": cached_expired_at,
+            }
+            return token
+
+        # 같은 토큰을 동시에 다시 발급하지 않도록 잠근다.
+        lock_key = f"kis-token:{self.env}:{self.user_id or 'anonymous'}"
+        with distributed_lock(lock_key, duration_seconds=120) as acquired:
+            if not acquired:
+                time.sleep(0.5)
+                cache_state = get_db_token_with_status("KIS", self.env, self.user_id)
+                token = cache_state.get("token")
+                if token:
+                    expired_at_raw = cache_state.get("expired_at")
+                    try:
+                        cached_expired_at = datetime.fromisoformat(str(expired_at_raw).replace("Z", "+00:00")).replace(tzinfo=None) if expired_at_raw else None
+                    except Exception:
+                        cached_expired_at = None
+                    self._access_token_cache = {
+                        "token": token,
+                        "expired_at": cached_expired_at,
+                    }
+                    self._last_token_cache_info = {
+                        "source": "token_cache_service",
+                        "cacheStatus": "HIT",
+                        "tokenStatus": "REUSED",
+                        "errorMessage": cache_state.get("error_message"),
+                        "expiredAt": cache_state.get("expired_at"),
+                    }
+                    return token
+
+            token_data = self._request_new_token()
+            new_token = token_data["access_token"]
+            expires_in = 86400
+            expired_at_raw = token_data.get("expires_in") or token_data.get("access_token_token_expired") or token_data.get("access_token_expired_at")
+            if expired_at_raw:
+                try:
+                    if isinstance(expired_at_raw, (int, float)):
+                        expires_in = int(expired_at_raw)
+                    else:
+                        exp_dt = datetime.strptime(str(expired_at_raw), "%Y-%m-%d %H:%M:%S")
+                        expires_in = int((exp_dt - datetime.now()).total_seconds())
+                except Exception:
+                    pass
+            if expires_in <= 0:
+                expires_in = 86400
+
+            try:
+                set_db_token("KIS", self.env, new_token, expires_in, self.user_id)
+            except Exception as error:
+                logger.warning("[KIS Client] token cache save failed: %s", error)
+            expired_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            self._access_token_cache = {
+                "token": new_token,
+                "expired_at": expired_at,
+            }
+            self._last_token_cache_info = {
+                "source": "token_cache_service",
+                "cacheStatus": "MISS",
+                "tokenStatus": "REFRESHED",
+                "errorMessage": cache_state.get("error_message"),
+                "expiredAt": expired_at.isoformat() + "Z",
+            }
+            return new_token
 
     def _request_new_token(self) -> dict:
         _enforce_kis_mock_rate_limit(self.env)
@@ -588,6 +705,150 @@ class KISClient(ExchangeClient):
         )
         rankings.sort(key=lambda row: row["change_rate"], reverse=direction == "up")
         return rankings[:limit]
+
+    def _normalize_overseas_rank_item(self, item: dict, source: str) -> dict | None:
+        symbol = str(item.get("symb") or item.get("ovrs_pdno") or "").strip().upper()
+        if not symbol:
+            return None
+
+        current_price = self._to_float(item.get("last") or item.get("ovrs_now_pric"))
+        change_rate = self._to_float(item.get("rate") or item.get("n_rate"))
+        trading_volume = self._to_float(item.get("tvol") or item.get("a_tvol"))
+        trading_value = self._to_float(item.get("tamt"))
+
+        return {
+            "symbol": symbol,
+            "name": str(item.get("name") or item.get("ename") or symbol).strip(),
+            "market_segment": "US",
+            "market_country": "US",
+            "current_price": current_price,
+            "change_rate": change_rate,
+            "trading_volume": trading_volume,
+            "trading_value": trading_value,
+            "as_of": datetime.utcnow().isoformat() + "Z",
+            "raw": {**item, "_rank_source": source, "_exchange_code": item.get("excd")},
+        }
+
+    def _get_overseas_rankings(
+        self,
+        endpoint: str,
+        tr_id: str,
+        params: dict,
+        source: str,
+        limit: int,
+    ) -> list[dict]:
+        _enforce_kis_mock_rate_limit(self.env)
+        token = self._get_cached_token()
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self.appkey,
+            "appsecret": self.appsecret,
+            "tr_id": tr_id,
+        }
+        res = requests.get(f"{self.base_url}{endpoint}", headers=headers, params=params, timeout=20)
+        if res.status_code != 200:
+            raise Exception(f"KIS overseas ranking failed: {res.text}")
+
+        data = res.json()
+        if data.get("rt_cd") != "0":
+            raise Exception(f"KIS overseas ranking error: {data.get('msg1')}")
+
+        rows = []
+        for item in data.get("output2", []) or []:
+            row = self._normalize_overseas_rank_item(item, source)
+            if row:
+                rows.append(row)
+        return rows[:limit]
+
+    def get_overseas_trade_volume_rankings(self, exchange: str = "NAS", limit: int = 50) -> list[dict]:
+        """
+        KIS 해외주식 거래량 순위 API를 호출합니다.
+        """
+        return self._get_overseas_rankings(
+            endpoint="/uapi/overseas-stock/v1/ranking/trade-vol",
+            tr_id="HHDFS76310010",
+            params={
+                "EXCD": exchange,
+                "NDAY": "0",
+                "VOL_RANG": "0",
+                "KEYB": "",
+                "AUTH": "",
+                "PRC1": "",
+                "PRC2": "",
+            },
+            source=f"KIS_OVERSEAS_TRADE_VOLUME_{exchange}",
+            limit=limit,
+        )
+
+    def get_overseas_updown_rankings(self, direction: str = "up", exchange: str = "NAS", limit: int = 50) -> list[dict]:
+        """
+        KIS 해외주식 상승률/하락률 순위 API를 호출합니다.
+        direction='up'은 상승률 상위, direction='down'은 하락률 하위를 반환합니다.
+        """
+        return self._get_overseas_rankings(
+            endpoint="/uapi/overseas-stock/v1/ranking/updown-rate",
+            tr_id="HHDFS76290000",
+            params={
+                "EXCD": exchange,
+                "NDAY": "0",
+                "GUBN": "1" if direction == "up" else "0",
+                "VOL_RANG": "0",
+                "AUTH": "",
+                "KEYB": "",
+            },
+            source=f"KIS_OVERSEAS_UPDOWN_{direction.upper()}_{exchange}",
+            limit=limit,
+        )
+
+    def get_overseas_rank_candidates(self, limit: int = 50) -> list[dict]:
+        """
+        미국 시장 거래량/상승률/하락률 순위 API를 합쳐 홈 캐시 후보군을 만듭니다.
+        NASDAQ, NYSE, AMEX를 기본 대상으로 조회합니다.
+        """
+        exchanges = [
+            value.strip().upper()
+            for value in os.getenv("KIS_US_RANK_EXCHANGES", ",".join(DEFAULT_US_RANK_EXCHANGES)).split(",")
+            if value.strip()
+        ]
+        collected: list[dict] = []
+        errors: list[str] = []
+        for exchange in exchanges:
+            for fetcher in (
+                lambda exchange=exchange: self.get_overseas_trade_volume_rankings(exchange=exchange, limit=limit),
+                lambda exchange=exchange: self.get_overseas_updown_rankings(direction="up", exchange=exchange, limit=limit),
+                lambda exchange=exchange: self.get_overseas_updown_rankings(direction="down", exchange=exchange, limit=limit),
+            ):
+                try:
+                    collected.extend(fetcher())
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        by_symbol: dict[str, dict] = {}
+        for row in collected:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            previous = by_symbol.get(symbol)
+            if not previous:
+                by_symbol[symbol] = row
+                continue
+            merged = {**previous, **row}
+            merged["trading_volume"] = max(
+                self._to_float(previous.get("trading_volume")),
+                self._to_float(row.get("trading_volume")),
+            )
+            merged["trading_value"] = max(
+                self._to_float(previous.get("trading_value")),
+                self._to_float(row.get("trading_value")),
+            )
+            by_symbol[symbol] = merged
+
+        rows = list(by_symbol.values())
+        rows.sort(key=lambda row: row.get("trading_volume", 0), reverse=True)
+        if not rows and errors:
+            raise Exception("KIS overseas rank candidates failed: " + "; ".join(errors[:5]))
+        return rows
 
     def get_market_rank_candidates(self, limit: int = 50) -> list[dict]:
         """
