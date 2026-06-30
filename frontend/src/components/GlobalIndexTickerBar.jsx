@@ -39,6 +39,20 @@ function formatPercent(value) {
   return `${prefix}${numeric.toFixed(2)}%`
 }
 
+function numericChangeRate(item) {
+  const raw = item.changeRate ?? item.changePercent ?? item.change_rate ?? item.change_percent
+  const numeric = Number(String(raw ?? '').replace('%', '').replace('+', ''))
+  return Number.isFinite(numeric) ? numeric : 0
+}
+
+function resolveDirection(item) {
+  if (item.direction === 'up' || item.direction === 'down') return item.direction
+  const rate = numericChangeRate(item)
+  if (rate > 0) return 'up'
+  if (rate < 0) return 'down'
+  return 'flat'
+}
+
 function changeClass(direction) {
   if (direction === 'up') return 'text-rose-400'
   if (direction === 'down') return 'text-sky-400'
@@ -61,6 +75,7 @@ function getDisplayItems(items) {
         currentPrice: item.currentPrice ?? item.current_price ?? item.value,
         changePrice: item.changePrice ?? item.change_price ?? item.change,
         changeRate: item.changeRate ?? item.changePercent ?? item.change_rate ?? item.change_percent,
+        displayDirection: resolveDirection(item),
       }
     })
     .filter(Boolean)
@@ -148,7 +163,7 @@ export default function GlobalIndexTickerBar() {
                   {formatValue(item.currentPrice)}
                 </span>
               </div>
-              <span className={`whitespace-nowrap text-xs font-bold ${changeClass(item.direction)}`}>
+              <span className={`whitespace-nowrap text-xs font-bold ${changeClass(item.displayDirection)}`}>
                 {formatDelta(item.changePrice)} ({formatPercent(item.changeRate)})
               </span>
             </div>

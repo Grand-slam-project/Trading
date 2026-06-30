@@ -114,12 +114,12 @@ class MarketIndexRepository:
             return []
 
     def _compat_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        current_price = row.get("current_price") or row.get("current_value") or 0
-        change_price = row.get("change_price") or row.get("change_value") or 0
-        change_rate = row.get("change_rate") or row.get("change_percent") or 0
+        current_price = self._first_present(row.get("current_price"), row.get("current_value"))
+        change_price = self._first_present(row.get("change_price"), row.get("change_value"))
+        change_rate = self._first_present(row.get("change_rate"), row.get("change_percent"))
         previous_close = row.get("previous_close")
         if previous_close in (None, ""):
-            previous_close = current_price - change_price if current_price and change_price is not None else 0
+            previous_close = current_price - change_price if current_price not in (None, "") and change_price not in (None, "") else None
         updated_at = row.get("updated_at") or row.get("synced_at") or row.get("as_of")
         return {
             "symbol": row.get("symbol"),
@@ -140,6 +140,12 @@ class MarketIndexRepository:
             "updated_at": updated_at,
             "raw_payload": row.get("raw_payload") or {},
         }
+
+    def _first_present(self, *values: Any) -> Any:
+        for value in values:
+            if value not in (None, ""):
+                return value
+        return None
 
     def _service_read_headers(self) -> dict[str, str]:
         return {

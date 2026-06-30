@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,9 +11,12 @@ from backend.services.toss_client import TossClient
 
 KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
-MARKET_INDEX_OPEN_STALE_SECONDS = int(os.getenv("MARKET_INDEX_OPEN_STALE_SECONDS", "180"))
-MARKET_INDEX_CLOSED_STALE_SECONDS = int(os.getenv("MARKET_INDEX_CLOSED_STALE_SECONDS", "1800"))
+MARKET_INDEX_EQUITY_STALE_SECONDS = int(os.getenv("MARKET_INDEX_EQUITY_STALE_SECONDS", "60"))
+MARKET_INDEX_FX_STALE_SECONDS = int(os.getenv("MARKET_INDEX_FX_STALE_SECONDS", "180"))
+MARKET_INDEX_MIN_LIVE_REFRESH_INTERVAL_SECONDS = int(os.getenv("MARKET_INDEX_MIN_LIVE_REFRESH_INTERVAL_SECONDS", "60"))
 _MARKET_INDEX_CACHE: list[dict[str, Any]] = []
+_MARKET_INDEX_LIVE_REFRESH_LOCK = threading.Lock()
+_MARKET_INDEX_LAST_LIVE_REFRESH_AT: datetime | None = None
 
 KIS_INDEX_DEFINITIONS = [
     {
@@ -139,6 +143,15 @@ def is_korean_market_open(now: datetime | None = None) -> bool:
     return 9 * 60 <= minutes <= 15 * 60 + 30
 
 
+def _resolve_market_index_stale_seconds(row: dict[str, Any]) -> int:
+    symbol = str(row.get("symbol") or "").upper().replace("/", "")
+    definition = INDEX_DEFINITION_BY_SYMBOL.get(symbol) or {}
+    kind = str(row.get("kind") or definition.get("kind") or "").lower()
+    if symbol == "USDKRW" or kind == "fx":
+        return MARKET_INDEX_FX_STALE_SECONDS
+    return MARKET_INDEX_EQUITY_STALE_SECONDS
+
+
 def parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -222,22 +235,43 @@ def _resolve_change_rate(
     previous_close: float,
     change_price: float | None = None,
     change_rate: float | None = None,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     # 저장된 등락률이 있으면 우선 활용하고, 없을 때만 현재가/전일종가로 재계산한다.
+    resolved_previous_close = float(previous_close or 0.0)
     if change_rate not in (None, ""):
         try:
             resolved_rate = float(change_rate)
         except (TypeError, ValueError):
             resolved_rate = 0.0
-        resolved_change_price = float(change_price or 0.0)
-        if resolved_rate or previous_close:
-            return resolved_change_price, resolved_rate
+        if change_price not in (None, ""):
+            return resolved_previous_close, float(change_price or 0.0), resolved_rate
 
-    resolved_previous_close = float(previous_close or 0.0)
+        if resolved_previous_close:
+            resolved_change_price, _ = _calculate_market_change(current_price, resolved_previous_close)
+            return resolved_previous_close, resolved_change_price, resolved_rate
+
+        denominator = 1 + (resolved_rate / 100.0)
+        if current_price and denominator != 0:
+            resolved_previous_close = current_price / denominator
+            resolved_change_price = current_price - resolved_previous_close
+            return resolved_previous_close, resolved_change_price, resolved_rate
+
+        return resolved_previous_close, float(change_price or 0.0), resolved_rate
+
     if resolved_previous_close:
-        return _calculate_market_change(current_price, resolved_previous_close)
+        resolved_change_price, resolved_rate = _calculate_market_change(current_price, resolved_previous_close)
+        return resolved_previous_close, resolved_change_price, resolved_rate
 
-    return float(change_price or 0.0), 0.0
+    return resolved_previous_close, float(change_price or 0.0), 0.0
+
+
+def _resolve_market_direction(change_price: float, change_rate: float) -> str:
+    direction_value = change_price if change_price else change_rate
+    if direction_value > 0:
+        return "up"
+    if direction_value < 0:
+        return "down"
+    return "flat"
 
 
 def _canonical_market_label(symbol: str, fallback_label: str | None = None) -> str:
@@ -250,7 +284,7 @@ def _normalize_market_index_row(row: dict[str, Any], definition: dict[str, Any])
     # 새 컬럼(current_price/change_price 등)과 기존 컬럼(current_value/change_value 등)을 동시에 받아서 호환성을 유지한다.
     current_price = float(row.get("current_price") or row.get("current_value") or 0)
     previous_close = float(row.get("previous_close") or 0)
-    change_price, change_rate = _resolve_change_rate(
+    previous_close, change_price, change_rate = _resolve_change_rate(
         current_price=current_price,
         previous_close=previous_close,
         change_price=row.get("change_price") or row.get("change_value"),
@@ -305,11 +339,38 @@ def _token_cache_info(client: Any | None) -> dict[str, Any]:
     return client.get_token_cache_info()
 
 
+def _reserve_market_index_live_refresh() -> tuple[bool, int]:
+    global _MARKET_INDEX_LAST_LIVE_REFRESH_AT
+    now = datetime.now(timezone.utc)
+    with _MARKET_INDEX_LIVE_REFRESH_LOCK:
+        if _MARKET_INDEX_LAST_LIVE_REFRESH_AT is not None:
+            elapsed_seconds = (now - _MARKET_INDEX_LAST_LIVE_REFRESH_AT).total_seconds()
+            wait_seconds = MARKET_INDEX_MIN_LIVE_REFRESH_INTERVAL_SECONDS - elapsed_seconds
+            if wait_seconds > 0:
+                return False, int(wait_seconds) + 1
+        _MARKET_INDEX_LAST_LIVE_REFRESH_AT = now
+        return True, 0
+
+
 def collect_market_index_rows() -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     clients_by_env: dict[str, KISClient | None] = {}
     target_date = datetime.now(KST).date().isoformat()
+    refresh_allowed, retry_after_seconds = _reserve_market_index_live_refresh()
+    if not refresh_allowed:
+        logger.info(
+            "[MarketIndex][collect-deferred] targetDate=%s retryAfterSeconds=%s reason=min_live_refresh_interval",
+            target_date,
+            retry_after_seconds,
+        )
+        return [], [{
+            "symbol": "ALL",
+            "message": "live collector deferred by minimum refresh interval",
+            "code": "LIVE_REFRESH_DEFERRED",
+            "retryAfterSeconds": str(retry_after_seconds),
+        }]
+
     logger.info(
         "[MarketIndex][collect-start] targetDate=%s symbolCount=%s symbols=%s",
         target_date,
@@ -490,8 +551,6 @@ def collect_market_index_rows() -> tuple[list[dict[str, Any]], list[dict[str, st
 
 def serialize_market_index_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     rows = _configured_rows(rows)
-    open_market = is_korean_market_open()
-    stale_seconds = MARKET_INDEX_OPEN_STALE_SECONDS if open_market else MARKET_INDEX_CLOSED_STALE_SECONDS
 
     items: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
@@ -505,6 +564,7 @@ def serialize_market_index_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         age_seconds = None
         if as_of:
             age_seconds = (datetime.now(timezone.utc) - as_of.astimezone(timezone.utc)).total_seconds()
+        stale_seconds = _resolve_market_index_stale_seconds(row)
 
         raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
         row_diagnostics = raw_payload.get("diagnostics")
@@ -513,7 +573,7 @@ def serialize_market_index_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
         current_price = float(row.get("current_price") or row.get("current_value") or 0)
         previous_close = float(row.get("previous_close") or 0)
-        change_price, change_rate = _resolve_change_rate(
+        previous_close, change_price, change_rate = _resolve_change_rate(
             current_price=current_price,
             previous_close=previous_close,
             change_price=row.get("change_price") or row.get("change_value"),
@@ -536,7 +596,7 @@ def serialize_market_index_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "changePercent": change_rate,
             "changeRate": change_rate,
             "change_rate": change_rate,
-            "direction": "up" if change_price > 0 else "down" if change_price < 0 else "flat",
+            "direction": _resolve_market_direction(change_price, change_rate),
             "updatedAt": synced_at,
             "syncedAt": synced_at,
             "currency": row.get("currency") or "USD",

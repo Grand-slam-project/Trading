@@ -6,10 +6,12 @@ import logging
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from backend.services.exchange_client import ExchangeClient
 
 KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
+MARKET_INDEX_DEBUG = os.getenv("MARKET_INDEX_DEBUG", "false").lower() == "true"
 
 # KIS 모의투자 API Rate Limiter
 _kis_mock_rate_limiter_lock = threading.Lock()
@@ -309,11 +311,250 @@ class KISClient(ExchangeClient):
             "today_candle_included": today_candle_included,
         }
 
-    def _build_standard_market_index_row(self, definition: dict, ticker: str, current_price: float, previous_close: float, payload: dict, source: str = "KIS_OPEN_API") -> dict:
+    def _parse_float_or_none(self, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            text = str(value).replace(",", "").replace("%", "").strip()
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_change_percent(self, value: Any) -> float | None:
+        parsed = self._parse_float_or_none(value)
+        if parsed is None:
+            return None
+
+        raw_text = str(value).strip()
+        if parsed != 0 and abs(parsed) < 1 and "." in raw_text:
+            decimals = raw_text.split(".", 1)[1].strip().rstrip("0")
+            if len(decimals) >= 3:
+                return parsed * 100
+        return parsed
+
+    def _first_parsed_float(self, data: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            parsed = self._parse_float_or_none(data.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _change_sign_multiplier(self, data: dict, keys: tuple[str, ...]) -> int | None:
+        for key in keys:
+            value = data.get(key)
+            if value in (None, ""):
+                continue
+            sign = str(value).strip().upper()
+            if sign in {"4", "5", "-", "D", "DOWN", "FALL", "FALLING"}:
+                return -1
+            if sign in {"1", "2", "+", "U", "UP", "RISE", "RISING"}:
+                return 1
+            if sign in {"0", "3"}:
+                return 0
+        return None
+
+    def _apply_change_sign(self, value: float | None, multiplier: int | None) -> float | None:
+        if value is None or multiplier is None:
+            return value
+        if multiplier == 0:
+            return 0.0
+        if value < 0:
+            return value
+        return abs(value) * multiplier
+
+    def _select_existing_fields(self, data: dict, keys: tuple[str, ...]) -> dict:
+        return {key: data.get(key) for key in keys if key in data}
+
+    def _log_market_index_raw_debug(
+        self,
+        definition: dict,
+        payload: dict,
+        raw_values: dict,
+        *,
+        current_keys: tuple[str, ...],
+        previous_close_keys: tuple[str, ...],
+        change_price_keys: tuple[str, ...],
+        change_rate_keys: tuple[str, ...],
+        change_sign_keys: tuple[str, ...],
+    ) -> None:
+        if not MARKET_INDEX_DEBUG:
+            return
+
+        output = payload.get("output") or payload.get("output1") or {}
+        logger.info(
+            "[MarketIndex][KIS raw debug] symbol=%s market=%s category=%s priceFields=%s previousCloseFields=%s changePriceFields=%s changeRateFields=%s signFields=%s parsed=%s",
+            definition.get("symbol"),
+            definition.get("market_country"),
+            definition.get("kind"),
+            self._select_existing_fields(output, current_keys),
+            self._select_existing_fields(output, previous_close_keys),
+            self._select_existing_fields(output, change_price_keys),
+            self._select_existing_fields(output, change_rate_keys),
+            self._select_existing_fields(output, change_sign_keys),
+            {
+                "current_price": raw_values.get("current_price"),
+                "previous_close": raw_values.get("previous_close"),
+                "change_price": raw_values.get("change_price"),
+                "change_rate": raw_values.get("change_rate"),
+                "sign_multiplier": raw_values.get("sign_multiplier"),
+            },
+        )
+
+    def _resolve_market_index_raw_values(
+        self,
+        payload: dict,
+        *,
+        current_keys: tuple[str, ...],
+        previous_close_keys: tuple[str, ...],
+        change_price_keys: tuple[str, ...],
+        change_rate_keys: tuple[str, ...],
+        change_sign_keys: tuple[str, ...] = (),
+    ) -> dict:
+        output = payload.get("output") or payload.get("output1") or {}
+        current_price = self._first_parsed_float(output, current_keys)
+        previous_close = self._first_parsed_float(output, previous_close_keys)
+        change_price = self._first_parsed_float(output, change_price_keys)
+        sign_multiplier = self._change_sign_multiplier(output, change_sign_keys)
+        change_price = self._apply_change_sign(change_price, sign_multiplier)
+        change_rate = None
+        for key in change_rate_keys:
+            if key in output:
+                change_rate = self._normalize_change_percent(output.get(key))
+                if change_rate is not None:
+                    break
+        change_rate = self._apply_change_sign(change_rate, sign_multiplier)
+
+        if current_price is None:
+            return {
+                "output": output,
+                "current_price": None,
+                "previous_close": previous_close,
+                "change_price": change_price,
+                "change_rate": change_rate,
+                "sign_multiplier": sign_multiplier,
+            }
+
+        if previous_close is None and change_price is not None:
+            previous_close = current_price - change_price
+
+        if change_price is None and previous_close is not None:
+            change_price = current_price - previous_close
+
+        if previous_close is None and change_rate is not None:
+            change_ratio = change_rate / 100.0
+            denominator = 1 + change_ratio
+            if denominator != 0:
+                previous_close = current_price / denominator
+                change_price = current_price - previous_close
+
+        if change_rate is None and previous_close not in (None, 0) and change_price is not None:
+            change_rate = (change_price / previous_close) * 100
+
+        return {
+            "output": output,
+            "current_price": current_price,
+            "previous_close": previous_close,
+            "change_price": change_price,
+            "change_rate": change_rate,
+            "sign_multiplier": sign_multiplier,
+        }
+
+    def _build_snapshot_from_raw_or_candles(
+        self,
+        definition: dict,
+        ticker: str,
+        payload: dict,
+        *,
+        current_keys: tuple[str, ...],
+        previous_close_keys: tuple[str, ...],
+        change_price_keys: tuple[str, ...],
+        change_rate_keys: tuple[str, ...],
+        change_sign_keys: tuple[str, ...] = (),
+        candle_symbol: str | None = None,
+        source: str = "KIS_OPEN_API",
+    ) -> dict:
+        raw_values = self._resolve_market_index_raw_values(
+            payload,
+            current_keys=current_keys,
+            previous_close_keys=previous_close_keys,
+            change_price_keys=change_price_keys,
+            change_rate_keys=change_rate_keys,
+            change_sign_keys=change_sign_keys,
+        )
+        self._log_market_index_raw_debug(
+            definition,
+            payload,
+            raw_values,
+            current_keys=current_keys,
+            previous_close_keys=previous_close_keys,
+            change_price_keys=change_price_keys,
+            change_rate_keys=change_rate_keys,
+            change_sign_keys=change_sign_keys,
+        )
+
+        current_price = raw_values.get("current_price")
+        previous_close = raw_values.get("previous_close")
+        change_price = raw_values.get("change_price")
+        change_rate = raw_values.get("change_rate")
+
+        if current_price is None or (previous_close is None and change_price is None and change_rate is None):
+            if current_price is None:
+                raise RuntimeError(f"KIS index returned no current price for {definition['symbol']}")
+            previous_close_info = self._get_daily_previous_close(candle_symbol or definition["code"])
+            current_price = current_price if current_price is not None else 0.0
+            previous_close = float(previous_close_info.get("previous_close") or 0.0)
+            change_price = current_price - previous_close if previous_close else 0.0
+            change_rate = ((change_price / previous_close) * 100) if previous_close else 0.0
+            if not previous_close and change_price == 0 and change_rate == 0:
+                raise RuntimeError(f"KIS index returned no usable change values for {definition['symbol']}")
+            return self._build_standard_market_index_row(
+                definition,
+                ticker,
+                current_price,
+                previous_close,
+                {
+                    "quote": payload,
+                    "candles": previous_close_info.get("candles") or [],
+                    "candleSelection": previous_close_info,
+                },
+                source=source,
+                change_price=change_price,
+                change_rate=change_rate,
+            )
+
+        current_price = float(current_price or 0.0)
+        if previous_close is None and change_price is not None:
+            previous_close = current_price - change_price
+        if change_price is None and previous_close is not None:
+            change_price = current_price - previous_close
+        if change_rate is None and previous_close not in (None, 0) and change_price is not None:
+            change_rate = (change_price / previous_close) * 100
+
+        return self._build_standard_market_index_row(
+            definition,
+            ticker,
+            current_price,
+            float(previous_close or 0.0),
+            {
+                "quote": payload,
+                "rawResolved": raw_values,
+            },
+            source=source,
+            change_price=change_price,
+            change_rate=change_rate,
+        )
+
+    def _build_standard_market_index_row(self, definition: dict, ticker: str, current_price: float, previous_close: float, payload: dict, source: str = "KIS_OPEN_API", change_price: float | None = None, change_rate: float | None = None) -> dict:
         # 지수 응답은 프론트/저장소 공통 포맷으로 맞춘다.
         # 여기서 필드명을 통일해두면 API, DB, UI 각각이 따로 계산하지 않아도 된다.
-        change_price = current_price - previous_close if previous_close else 0.0
-        change_rate = ((change_price / previous_close) * 100) if previous_close else 0.0
+        if change_price is None and previous_close:
+            change_price = current_price - previous_close
+        if change_rate is None and previous_close:
+            change_rate = ((change_price or 0.0) / previous_close) * 100
+        if change_price is None:
+            change_price = 0.0
+        if change_rate is None:
+            change_rate = 0.0
         synced_at = datetime.now(timezone.utc).isoformat()
         return {
             "symbol": definition["symbol"],
@@ -369,22 +610,15 @@ class KISClient(ExchangeClient):
         if payload.get("rt_cd") != "0":
             raise RuntimeError(payload.get("msg1") or f"Domestic index lookup failed for {definition['symbol']}")
 
-        output = payload.get("output") or {}
-        previous_close_info = self._get_daily_previous_close(definition["code"])
-        current_price = float(output.get("bstp_nmix_prpr") or 0)
-        previous_close = float(previous_close_info.get("previous_close") or 0.0)
-        change_value = current_price - previous_close if previous_close else 0.0
-        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
-        return self._build_standard_market_index_row(
+        return self._build_snapshot_from_raw_or_candles(
             definition,
             definition["code"],
-            current_price,
-            previous_close,
-            {
-                "quote": payload,
-                "candles": previous_close_info.get("candles") or [],
-                "candleSelection": previous_close_info,
-            },
+            payload,
+            current_keys=("bstp_nmix_prpr", "prpr", "stck_prpr", "idx_prpr", "now_prpr"),
+            previous_close_keys=("bstp_nmix_prdy_clpr", "bstp_nmix_prev_prpr", "prdy_clpr", "prev_clpr", "base_prpr"),
+            change_price_keys=("bstp_nmix_prdy_vrss", "prdy_vrss", "prdy_vrss_prpr", "change_price", "change", "vs_prpr", "prdy_vrss_amt"),
+            change_rate_keys=("bstp_nmix_prdy_ctrt", "prdy_ctrt", "flct_rt", "change_percent", "change_rate", "prdy_flct_rt"),
+            change_sign_keys=("bstp_nmix_prdy_vrss_sign", "prdy_vrss_sign", "prdy_sign", "change_sign", "sign"),
         )
 
     def _get_overseas_index_snapshot(self, definition: dict) -> dict:
@@ -412,24 +646,15 @@ class KISClient(ExchangeClient):
         if payload.get("rt_cd") != "0":
             raise RuntimeError(payload.get("msg1") or f"Overseas index lookup failed for {definition['symbol']}")
 
-        output = payload.get("output1") or {}
-        current_value = float(output.get("ovrs_nmix_prpr") or 0)
-        previous_close_info = self._get_daily_previous_close(definition["code"])
-        previous_close = float(previous_close_info.get("previous_close") or 0.0)
-        change_value = current_value - previous_close if previous_close else 0.0
-        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
-        if current_value == 0 and change_value == 0 and change_percent == 0:
-            raise RuntimeError(f"Overseas index returned empty values for {definition['symbol']}")
-        return self._build_standard_market_index_row(
+        return self._build_snapshot_from_raw_or_candles(
             definition,
             definition["code"],
-            current_value,
-            previous_close,
-            {
-                "quote": payload,
-                "candles": previous_close_info.get("candles") or [],
-                "candleSelection": previous_close_info,
-            },
+            payload,
+            current_keys=("ovrs_nmix_prpr", "prpr", "stck_prpr", "idx_prpr", "now_prpr"),
+            previous_close_keys=("ovrs_nmix_prdy_clpr", "ovrs_nmix_prev_prpr", "prdy_clpr", "prev_clpr", "base_prpr"),
+            change_price_keys=("ovrs_nmix_prdy_vrss", "prdy_vrss", "prdy_vrss_prpr", "change_price", "change", "vs_prpr", "prdy_vrss_amt"),
+            change_rate_keys=("ovrs_nmix_prdy_ctrt", "prdy_ctrt", "flct_rt", "change_percent", "change_rate", "prdy_flct_rt"),
+            change_sign_keys=("ovrs_nmix_prdy_vrss_sign", "prdy_vrss_sign", "prdy_sign", "change_sign", "sign"),
         )
 
     def _get_fx_index_snapshot(self, definition: dict) -> dict:
@@ -457,24 +682,15 @@ class KISClient(ExchangeClient):
         if payload.get("rt_cd") != "0":
             raise RuntimeError(payload.get("msg1") or f"FX lookup failed for {definition['symbol']}")
 
-        output = payload.get("output1") or {}
-        current_value = float(output.get("ovrs_nmix_prpr") or 0)
-        previous_close_info = self._get_daily_previous_close(definition["code"])
-        previous_close = float(previous_close_info.get("previous_close") or 0.0)
-        change_value = current_value - previous_close if previous_close else 0.0
-        change_percent = ((change_value / previous_close) * 100) if previous_close else 0.0
-        if current_value == 0 and change_value == 0 and change_percent == 0:
-            raise RuntimeError(f"FX returned empty values for {definition['symbol']}")
-        return self._build_standard_market_index_row(
+        return self._build_snapshot_from_raw_or_candles(
             definition,
             definition["code"],
-            current_value,
-            previous_close,
-            {
-                "quote": payload,
-                "candles": previous_close_info.get("candles") or [],
-                "candleSelection": previous_close_info,
-            },
+            payload,
+            current_keys=("ovrs_nmix_prpr", "prpr", "stck_prpr", "idx_prpr", "now_prpr", "frgn_prpr"),
+            previous_close_keys=("ovrs_nmix_prdy_clpr", "ovrs_nmix_prev_prpr", "prdy_clpr", "prev_clpr", "base_prpr", "frgn_prdy_clpr"),
+            change_price_keys=("ovrs_nmix_prdy_vrss", "prdy_vrss", "prdy_vrss_prpr", "change_price", "change", "vs_prpr", "prdy_vrss_amt", "frgn_prdy_vrss"),
+            change_rate_keys=("ovrs_nmix_prdy_ctrt", "prdy_ctrt", "flct_rt", "change_percent", "change_rate", "prdy_flct_rt", "frgn_prdy_ctrt"),
+            change_sign_keys=("ovrs_nmix_prdy_vrss_sign", "frgn_prdy_vrss_sign", "prdy_vrss_sign", "prdy_sign", "change_sign", "sign"),
             source="KIS_OPEN_API",
         )
 
