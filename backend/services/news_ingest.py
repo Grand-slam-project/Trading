@@ -9,6 +9,7 @@ import requests
 
 from backend.services.news_query_planner import NewsQuery, NewsQueryPlanner
 from backend.services.news_repository import NewsRepository
+from backend.services.symbol_metadata import SYMBOL_METADATA
 
 
 class NewsIngestService:
@@ -26,6 +27,105 @@ class NewsIngestService:
             include_naver=bool(self.naver_client_id and self.naver_client_secret),
             include_finnhub=bool(self.finnhub_api_key),
         )
+        return self._run_queries(selected_queries, skipped_queries, started_at)
+
+    def run_for_symbol(
+        self,
+        symbol: str,
+        display_name: str = "",
+        market: str = "",
+        asset_type: str = "",
+    ) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            raise ValueError("symbol is required")
+
+        meta = SYMBOL_METADATA.get(normalized_symbol, {})
+        resolved_asset_type = str(asset_type or meta.get("asset_type") or "STOCK").strip().upper()
+        resolved_display_name = str(display_name or meta.get("display_name") or normalized_symbol).strip()
+        resolved_market = str(market or meta.get("market") or "").strip().upper()
+        query_market = "GLOBAL" if resolved_market in {"US", "GLOBAL"} else "DOMESTIC"
+        started_at = datetime.now(timezone.utc).isoformat()
+
+        selected_queries: list[NewsQuery] = []
+        if self.naver_client_id and self.naver_client_secret:
+            selected_queries.extend(
+                self._build_manual_naver_queries(
+                    symbol=normalized_symbol,
+                    company_name=resolved_display_name,
+                    market=query_market,
+                    asset_type=resolved_asset_type,
+                )
+            )
+
+        if self.finnhub_api_key and resolved_asset_type == "STOCK" and query_market == "GLOBAL":
+            selected_queries.append(
+                NewsQuery(
+                    provider="FINNHUB",
+                    query_key=f"finnhub:manual-symbol:{normalized_symbol}",
+                    query_text=normalized_symbol,
+                    category="symbol",
+                    market="GLOBAL",
+                    priority=1,
+                    symbol=normalized_symbol,
+                    company_name=resolved_display_name,
+                    reason="manual_symbol_request",
+                )
+            )
+
+        if not selected_queries:
+            raise ValueError("사용 가능한 뉴스 수집 공급원이 없습니다. NAVER 또는 FINNHUB 설정을 확인해 주세요.")
+
+        return self._run_queries(selected_queries, skipped_queries=[], started_at=started_at)
+
+    def _build_manual_naver_queries(
+        self,
+        symbol: str,
+        company_name: str,
+        market: str,
+        asset_type: str,
+    ) -> list[NewsQuery]:
+        if asset_type == "CRYPTO":
+            variants = [
+                ("headline", company_name),
+                ("market", f"{company_name} 코인"),
+                ("outlook", f"{company_name} 전망"),
+            ]
+        elif market == "GLOBAL":
+            variants = [
+                ("headline", company_name),
+                ("earnings", f"{company_name} earnings"),
+                ("guidance", f"{company_name} outlook"),
+            ]
+        else:
+            variants = [
+                ("headline", company_name),
+                ("earnings", f"{company_name} 실적"),
+                ("disclosure", f"{company_name} 공시"),
+            ]
+
+        return [
+            NewsQuery(
+                provider="NAVER",
+                query_key=f"naver:manual-symbol:{symbol}:{variant_key}",
+                query_text=query_text,
+                category="symbol",
+                market=market,
+                priority=index + 1,
+                symbol=symbol,
+                company_name=company_name,
+                reason="manual_symbol_request",
+            )
+            for index, (variant_key, query_text) in enumerate(variants)
+            if query_text.strip()
+        ]
+
+    def _run_queries(
+        self,
+        selected_queries: list[NewsQuery],
+        skipped_queries: list[dict[str, Any]],
+        started_at: str,
+    ) -> dict[str, Any]:
         batches: list[dict[str, Any]] = []
         per_query_results: list[dict[str, Any]] = []
 

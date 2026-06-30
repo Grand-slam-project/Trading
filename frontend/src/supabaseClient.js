@@ -19,9 +19,41 @@ function parseWatchNumber(value) {
 export function normalizeWatchlistItem(row = {}) {
   const symbol = String(row.symbol || row.code || row.id || '').trim().toUpperCase()
   const assetType = String(row.asset_type || row.assetType || 'STOCK').toUpperCase() === 'CRYPTO' ? 'CRYPTO' : 'STOCK'
-  const exchange = String(row.exchange || (assetType === 'CRYPTO' ? 'COINONE' : (/^\d{6}$/.test(symbol) ? 'KIS' : 'TOSS'))).toUpperCase()
-  const marketCountry = String(row.market_country || row.marketCountry || (assetType === 'CRYPTO' ? 'KR' : (/^\d{6}$/.test(symbol) ? 'KR' : 'US'))).toUpperCase()
-  const currency = String(row.currency || (assetType === 'CRYPTO' ? (exchange === 'BINANCE' ? 'USDT' : 'KRW') : (marketCountry === 'US' ? 'USD' : 'KRW'))).toUpperCase()
+  // exchange 결정: 주식이고 국내 규격이면 강제로 KIS로 보정
+  let exchange = String(row.exchange || '').toUpperCase()
+  if (assetType === 'CRYPTO') {
+    exchange = exchange || 'COINONE'
+  } else {
+    if (/^[0-9a-zA-Z]{6,7}$/.test(symbol)) {
+      exchange = 'KIS'
+    } else {
+      exchange = exchange || 'TOSS'
+    }
+  }
+
+  // marketCountry 결정: 주식이고 국내 규격이면 강제로 KR로 보정
+  let marketCountry = String(row.market_country || row.marketCountry || '').toUpperCase()
+  if (assetType === 'CRYPTO') {
+    marketCountry = 'KR'
+  } else {
+    if (/^[0-9a-zA-Z]{6,7}$/.test(symbol)) {
+      marketCountry = 'KR'
+    } else {
+      marketCountry = marketCountry || 'US'
+    }
+  }
+
+  // currency 결정
+  let currency = String(row.currency || '').toUpperCase()
+  if (assetType === 'CRYPTO') {
+    currency = exchange === 'BINANCE' ? 'USDT' : 'KRW'
+  } else {
+    if (marketCountry === 'US') {
+      currency = 'USD'
+    } else {
+      currency = 'KRW'
+    }
+  }
   const latestPrice = parseWatchNumber(row.latest_price ?? row.latestPrice ?? row.current_price ?? row.live_price ?? row.price)
   const changeRate = parseWatchNumber(row.change_rate ?? row.changeRate ?? row.live_change_rate ?? row.change)
   const averagePrice = parseWatchNumber(row.average_price ?? row.averagePrice ?? row.current_price ?? row.live_price ?? row.price)

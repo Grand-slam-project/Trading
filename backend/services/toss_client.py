@@ -619,6 +619,127 @@ class TossClient(ExchangeClient):
 
         return accounts
 
+    def _to_float_or_none(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _read_nested(self, payload, path: str):
+        current = payload
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+            if current is None:
+                return None
+        return current
+
+    def _extract_cash_amount_from_candidate(self, candidate):
+        if candidate is None:
+            return None, None
+
+        numeric = self._to_float_or_none(candidate)
+        if numeric is not None:
+            return numeric, None
+
+        if not isinstance(candidate, dict):
+            return None, None
+
+        if "amount" in candidate:
+            amount_value, amount_currency = self._extract_cash_amount_from_candidate(candidate.get("amount"))
+            if amount_value is not None:
+                return amount_value, amount_currency
+
+        for keys, currency in (
+            (("krw", "KRW", "won"), "KRW"),
+            (("usd", "USD", "dollar"), "USD"),
+        ):
+            for key in keys:
+                numeric = self._to_float_or_none(candidate.get(key))
+                if numeric is not None:
+                    return numeric, currency
+
+        for key in ("value", "cash", "available", "orderable", "withdrawable", "buyingPower"):
+            numeric = self._to_float_or_none(candidate.get(key))
+            if numeric is not None:
+                return numeric, None
+
+        return None, None
+
+    def _extract_available_cash_info(self, result_payload, account_payload=None):
+        """
+        토스 응답에서 예수금 또는 주문 가능 금액 후보 필드를 최대한 보수적으로 추출합니다.
+        값이 명확하지 않으면 0으로 단정하지 않고 None을 유지합니다.
+        """
+        candidate_specs = [
+            ("availableCash", "availableCash"),
+            ("withdrawableCash", "withdrawableCash"),
+            ("withdrawableAmount", "withdrawableAmount"),
+            ("orderableCash", "orderableCash"),
+            ("orderableAmount", "orderableAmount"),
+            ("buyingPower", "buyingPower"),
+            ("cash", "cash"),
+            ("deposit", "deposit"),
+            ("settlementCash", "settlementCash"),
+        ]
+        nested_paths = [
+            "summary.availableCash",
+            "summary.withdrawableCash",
+            "summary.orderableAmount",
+            "summary.buyingPower",
+            "balances.availableCash",
+            "balances.withdrawableCash",
+            "balances.orderableAmount",
+            "balances.buyingPower",
+            "cash.available",
+            "cash.withdrawable",
+            "cash.orderable",
+        ]
+
+        for payload_name, payload in (("holdings_result", result_payload), ("account", account_payload)):
+            if not isinstance(payload, dict):
+                continue
+
+            for field_name, source_name in candidate_specs:
+                value, currency = self._extract_cash_amount_from_candidate(payload.get(field_name))
+                if value is not None:
+                    return {"value": value, "currency": currency, "source": f"{payload_name}.{source_name}"}
+
+            for nested_path in nested_paths:
+                value, currency = self._extract_cash_amount_from_candidate(self._read_nested(payload, nested_path))
+                if value is not None:
+                    return {"value": value, "currency": currency, "source": f"{payload_name}.{nested_path}"}
+
+        return {"value": None, "currency": None, "source": None}
+
+    def _get_buying_power_by_currency(self, currency: str):
+        token = self._get_cached_token()
+        url = f"{self.base_url}/api/v1/buying-power"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Tossinvest-Account": self.account_seq,
+            "Content-Type": "application/json",
+        }
+        params = {
+            "currency": currency,
+        }
+        res = self._send_request("GET", url, headers=headers, params=params)
+        if res.status_code != 200:
+            raise Exception(f"토스 매수 가능 금액 조회 실패 ({currency}, 상태 코드 {res.status_code}): {res.text}")
+
+        data = res.json()
+        if "error" in data:
+            err = data["error"]
+            raise Exception(f"토스 매수 가능 금액 조회 에러 [{err.get('code')}]: {err.get('message')}")
+
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        buying_power = self._to_float_or_none(result.get("cashBuyingPower"))
+        return {
+            "currency": str(result.get("currency") or currency).upper(),
+            "cash_buying_power": buying_power,
+        }
+
     def get_accounts(self) -> list:
         """
         사용자의 계좌 목록 정보를 가져옵니다.
@@ -631,6 +752,8 @@ class TossClient(ExchangeClient):
             if not accounts:
                 raise Exception("조회 가능한 토스 계좌가 존재하지 않습니다.")
             self.account_seq = accounts[0].get("accountSeq")
+        else:
+            accounts = None
 
         token = self._get_cached_token()
         url = f"{self.base_url}/api/v1/holdings"
@@ -712,9 +835,57 @@ class TossClient(ExchangeClient):
         if total_eval == 0.0:
             total_eval = sum(h["eval_amount"] for h in holdings_list)
 
+        if accounts is None:
+            try:
+                accounts = self.get_accounts()
+            except Exception:
+                accounts = []
+        selected_account = next(
+            (
+                account for account in (accounts or [])
+                if str(account.get("accountSeq", "")) == str(self.account_seq)
+            ),
+            (accounts or [None])[0],
+        )
+        exchange_rate = self.get_exchange_rate()
+        buying_power_components = []
+        buying_power_errors = []
+
+        for currency in ("KRW", "USD"):
+            try:
+                buying_power_payload = self._get_buying_power_by_currency(currency)
+                if buying_power_payload["cash_buying_power"] is not None:
+                    buying_power_components.append(buying_power_payload)
+            except Exception as error:
+                buying_power_errors.append(f"{currency}:{error}")
+
+        if buying_power_components:
+            available_cash = 0.0
+            for component in buying_power_components:
+                amount = component["cash_buying_power"] or 0.0
+                if component["currency"] == "USD":
+                    available_cash += amount * exchange_rate
+                else:
+                    available_cash += amount
+            available_cash_currency = "KRW"
+            available_cash_source = "buying-power"
+        else:
+            cash_info = self._extract_available_cash_info(result_payload=result, account_payload=selected_account)
+            available_cash = cash_info["value"]
+            available_cash_currency = cash_info["currency"] or ("USD" if usd_val > 0.0 else "KRW")
+            available_cash_source = cash_info["source"]
+
         return {
             "total_evaluation": total_eval,
-            "available_cash": 0.0,  # holdings API에 예수금 미포함
+            "available_cash": available_cash,
+            "available_cash_currency": available_cash_currency,
+            "available_cash_supported": available_cash is not None,
+            "available_cash_source": available_cash_source,
+            "available_cash_details": {
+                "exchange_rate": exchange_rate,
+                "components": buying_power_components,
+                "errors": buying_power_errors,
+            },
             "currency": "USD" if usd_val > 0.0 else "KRW",
             "holdings": holdings_list
         }
@@ -1004,6 +1175,80 @@ class TossClient(ExchangeClient):
         주문 상태를 조회합니다.
         """
         return self._get_order_status_impl(order_id)
+
+    def list_orders(
+        self,
+        status: str,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> dict:
+        """
+        토스 주문내역 목록을 조회합니다.
+        """
+        if self.env == "MOCK":
+            return {
+                "orders": [],
+                "next_cursor": None,
+                "has_next": False,
+                "raw": {"result": {"orders": []}},
+            }
+
+        normalized_status = str(status or "").upper()
+        if normalized_status not in {"OPEN", "CLOSED"}:
+            raise ValueError("토스 주문목록 조회 상태값은 OPEN 또는 CLOSED만 지원합니다.")
+
+        token = self._get_cached_token()
+        url = f"{self.base_url}/api/v1/orders"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Tossinvest-Account": self.account_seq,
+            "Content-Type": "application/json",
+        }
+        params = {"status": normalized_status}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        if cursor:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = max(1, min(int(limit), 100))
+        if symbol:
+            params["symbol"] = symbol
+
+        res = self._send_request("GET", url, headers=headers, params=params, timeout=20)
+        if res.status_code != 200:
+            raise Exception(f"토스 주문 목록 조회 실패: {res.text}")
+
+        data = res.json()
+        if isinstance(data, dict) and data.get("error"):
+            err = data["error"]
+            err_code = str(err.get("code") or "")
+            err_message = str(err.get("message") or err)
+            if err_code == "closed-not-supported":
+                raise RuntimeError("토스 CLOSED 주문내역 조회가 현재 계정/환경에서 지원되지 않습니다.")
+            raise RuntimeError(f"토스 주문 목록 조회 에러 [{err_code}]: {err_message}")
+
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        if not isinstance(result, dict):
+            result = {}
+        orders = result.get("orders")
+        if orders is None:
+            orders = result.get("items")
+        if not isinstance(orders, list):
+            orders = []
+
+        next_cursor = result.get("nextCursor") or result.get("cursor")
+        has_next = bool(result.get("hasNext")) or bool(next_cursor)
+        return {
+            "orders": orders,
+            "next_cursor": next_cursor,
+            "has_next": has_next,
+            "raw": data,
+        }
 
     def _get_candles_impl(self, symbol: str, interval: str = "1d", count: int = 120) -> list:
         token = self._get_cached_token()

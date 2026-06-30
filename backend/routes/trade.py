@@ -6,6 +6,10 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 from backend.services.supabase_client import query_supabase
 from backend.services.auth_service import get_user_id_from_header
+from backend.services.broker_order_history_service import (
+    list_broker_order_history,
+    sync_toss_broker_orders,
+)
 from backend.services.toss_client import TossClient
 from backend.services.kis_client import KISClient
 
@@ -18,6 +22,24 @@ PRICE_CHANGE_CACHE_TTL = 10
 CACHE_TTL_SECONDS = 10  # 기본값 10초 유효
 LEVEL2_CACHE_TTL_SECONDS = 10
 REAL_ORDER_LIMIT_KRW = 100000.0
+
+def determine_market_country(symbol: str) -> str:
+    """
+    주식 종목의 국내/해외 여부를 판별합니다.
+    1. SYMBOL_METADATA 캐시를 먼저 조회합니다.
+    2. 캐시에 없을 경우, 6~7자리 영숫자 조합(ETF/ETN 등 포함)은 국내 주식(KR), 그 외는 해외 주식(US)으로 판정합니다.
+    """
+    from backend.services.symbol_metadata import SYMBOL_METADATA
+    symbol_upper = str(symbol).strip().upper()
+    if symbol_upper in SYMBOL_METADATA:
+        market = SYMBOL_METADATA[symbol_upper].get("market")
+        if market in ("KR", "US"):
+            return market
+            
+    if re.match(r"^[0-9A-Z]{6,7}$", symbol_upper):
+        return "KR"
+    return "US"
+
 
 def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
     cache_key = (exchange, symbol, broker_env)
@@ -748,7 +770,7 @@ def place_manual_order():
         asset_type = "STOCK" if exchange in ("TOSS", "KIS") else "CRYPTO"
         market_country = None
         if asset_type == "STOCK":
-            market_country = "KR" if re.match(r"^\d{6}$", symbol) else "US"
+            market_country = determine_market_country(symbol)
 
         try:
             rule_data = {
@@ -775,7 +797,7 @@ def place_manual_order():
         asset_type = "STOCK" if exchange in ("TOSS", "KIS") else "CRYPTO"
         market_country = None
         if asset_type == "STOCK":
-            market_country = "KR" if re.match(r"^\d{6}$", symbol) else "US"
+            market_country = determine_market_country(symbol)
         currency = "KRW" if (exchange != "BINANCE" and market_country != "US") else "USD"
         
         proposal_data = {
@@ -2165,6 +2187,54 @@ def lookup_symbol():
             "market": ""
         }
     })
+
+
+@trade_bp.route("/api/trade/history/sync/toss", methods=["POST"])
+def sync_toss_trade_history():
+    """
+    토스 실제 주문내역을 broker_order_history 테이블로 동기화합니다.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return jsonify({"success": False, "message": "인증 토큰이 없습니다."}), 401
+
+    body = request.get_json(silent=True) or {}
+    try:
+        result = sync_toss_broker_orders(
+            auth_header=auth_header,
+            broker_env=body.get("broker_env", "REAL"),
+            status_scope=body.get("status_scope", "ALL"),
+            from_date=body.get("from"),
+            to_date=body.get("to"),
+            symbol=body.get("symbol"),
+            limit=body.get("limit", 100),
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as error:
+        current_app.logger.exception("토스 주문내역 동기화 실패")
+        return jsonify({"success": False, "message": str(error)}), 400
+
+
+@trade_bp.route("/api/trade/history/broker", methods=["GET"])
+def get_broker_trade_history():
+    """
+    사용자의 브로커 주문 원장을 조회합니다.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return jsonify({"success": False, "message": "인증 토큰이 없습니다."}), 401
+
+    try:
+        rows = list_broker_order_history(
+            auth_header=auth_header,
+            limit=request.args.get("limit", 300),
+            exchange=request.args.get("exchange"),
+            broker_env=request.args.get("broker_env"),
+        )
+        return jsonify({"success": True, "data": rows})
+    except Exception as error:
+        current_app.logger.exception("브로커 주문 원장 조회 실패")
+        return jsonify({"success": False, "message": str(error)}), 400
 
 
 @trade_bp.route("/api/symbol/search", methods=["GET"])
