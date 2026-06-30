@@ -14,15 +14,19 @@ export default function Header({ isLoggedIn, userEmail, handleLogout }) {
   return (
     <header className="max-w-7xl mx-auto mb-8 border-b border-slate-800 pb-4 flex flex-col gap-4 lg:flex-row lg:justify-between lg:items-center">
       {/* 로고 + 페이지 설명 */}
-      <div>
+      <div className="lg:translate-y-[2px]">
         <Link to="/" className="inline-flex">
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-3 flex-wrap hover:opacity-90 transition-opacity cursor-pointer">
+          <div className="group flex items-center gap-3 hover:opacity-90 transition-opacity cursor-pointer">
             <img src="/logo.png" alt="Logo" className="w-8 h-8 object-contain" />
-            <span>SYNTHETIC INTELLIGENCE TERMINAL</span>
-            <span className="text-xs px-2 py-0.5 rounded border border-ai-cyan text-ai-cyan font-mono font-medium animate-pulse">
-              MOCK TRADING
+            
+            {/* 그라데이션 타이포그래피 */}
+            <span className="text-2xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white via-slate-200 to-cyan-300 hover:to-cyan-300 transition-all duration-300">
+              ANTRY
             </span>
-          </h1>
+            <span className="text-xs px-2 py-0.5 rounded border border-ai-cyan text-ai-cyan font-mono font-medium animate-pulse">
+               TRADING
+            </span>
+          </div>
         </Link>
 
       </div>

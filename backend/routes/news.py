@@ -95,7 +95,18 @@ def sync_news_feed():
     """Tavily API 등을 통해 웹 상에서 최신 뉴스를 실시간으로 데이터베이스에 동기화 수집합니다."""
     news_ingest_service = current_app.news_ingest_service
     try:
-        result = news_ingest_service.run_once()
+        data = request.get_json(silent=True) or {}
+        symbol = str(data.get("symbol") or "").strip().upper()
+
+        if symbol:
+            result = news_ingest_service.run_for_symbol(
+                symbol=symbol,
+                display_name=str(data.get("display_name") or "").strip(),
+                market=str(data.get("market") or "").strip(),
+                asset_type=str(data.get("asset_type") or "").strip(),
+            )
+        else:
+            result = news_ingest_service.run_once()
         return jsonify({
             "success": True,
             "data": result,

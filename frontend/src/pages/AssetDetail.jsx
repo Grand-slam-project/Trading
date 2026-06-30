@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useEffectEvent, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { createChart, CandlestickSeries } from 'lightweight-charts'
-import { supabase } from '../supabaseClient'
+import { supabase, deleteUserWatchlistItem, fetchUserWatchlist, upsertUserWatchlistItem } from '../supabaseClient'
 import Header from '../components/Header.jsx'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050'
@@ -43,6 +43,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [loadingChart, setLoadingChart] = useState(true)
   const [currentPrice, setCurrentPrice] = useState(0)
   const [priceChangeRate, setPriceChangeRate] = useState(0)
+  const [previousClosePrice, setPreviousClosePrice] = useState(null)
+  const [hasAuthoritativeChangeRate, setHasAuthoritativeChangeRate] = useState(false)
 
   // 4. 주문 폼 상태
   const [side, setSide] = useState('BUY') // BUY | SELL
@@ -65,6 +67,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [activeTab, setActiveTab] = useState('news') // news | community
   const [newsList, setNewsList] = useState([])
   const [loadingNews, setLoadingNews] = useState(false)
+  const [newsSyncing, setNewsSyncing] = useState(false)
+  const [newsSyncMessage, setNewsSyncMessage] = useState({ text: '', isError: false })
   const [displayName, setDisplayName] = useState(symbol)
   const [marketFeeds, setMarketFeeds] = useState({
     candles: { source: 'IDLE', isMock: false, degradedReason: '' },
@@ -79,6 +83,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [mlSignal, setMlSignal] = useState(null)
   const [mlSignalLoading, setMlSignalLoading] = useState(false)
   const [mlSignalMessage, setMlSignalMessage] = useState('')
+  const [isMlSignalExpanded, setIsMlSignalExpanded] = useState(false)
+  const [isFavorite, setIsFavorite] = useState(false)
 
   const chartContainerRef = useRef(null)
   const chartRef = useRef(null)
@@ -235,6 +241,56 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     }
   }
 
+  // 관심종목(즐겨찾기) 상태 조회
+  const loadFavoriteStatus = async () => {
+    if (!isLoggedIn) {
+      setIsFavorite(false)
+      return
+    }
+    try {
+      const items = await fetchUserWatchlist()
+      const hasMatch = items.some(item => 
+        item.id === symbol && 
+        item.assetType === resolvedAssetType && 
+        item.exchange === exchange
+      )
+      setIsFavorite(hasMatch)
+    } catch (e) {
+      console.warn('즐겨찾기 상태 로드 실패:', e)
+    }
+  }
+
+  // 관심종목(즐겨찾기) 토글 처리
+  const handleToggleFavorite = async () => {
+    if (!isLoggedIn) {
+      alert("로그인이 필요한 서비스입니다.")
+      return
+    }
+
+    const itemPayload = {
+      symbol: symbol,
+      name: displayName,
+      exchange: exchange,
+      asset_type: resolvedAssetType,
+      latest_price: currentPrice || null,
+      change_rate: priceChangeRate || null,
+      average_price: currentPrice || null,
+      quantity: 0
+    }
+
+    try {
+      if (isFavorite) {
+        await deleteUserWatchlistItem(itemPayload)
+        setIsFavorite(false)
+      } else {
+        await upsertUserWatchlistItem(itemPayload)
+        setIsFavorite(true)
+      }
+    } catch (error) {
+      alert(error.message || "즐겨찾기 갱신 실패")
+    }
+  }
+
   // 실시간 크롤링 뉴스 로드 (종목 한글명/코드 자동 필터링)
   const fetchNewsList = async () => {
     setLoadingNews(true)
@@ -248,6 +304,52 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       console.error("뉴스 로드 실패:", e)
     } finally {
       setLoadingNews(false)
+    }
+  }
+
+  const handleRequestNewsSync = async () => {
+    setNewsSyncing(true)
+    setNewsSyncMessage({ text: '', isError: false })
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/news/sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol,
+          display_name: displayName,
+          market: isStockAsset && !/^\d+$/.test(symbol) ? 'GLOBAL' : 'DOMESTIC',
+          asset_type: resolvedAssetType,
+        }),
+      })
+      const resData = await response.json()
+      if (!response.ok || !resData.success) {
+        setNewsSyncMessage({
+          text: resData.message || '뉴스 수집 요청에 실패했습니다.',
+          isError: true,
+        })
+        return
+      }
+
+      const insertedCount = Number(resData.data?.inserted || 0)
+      const fetchedCount = Number(resData.data?.fetched || 0)
+      setNewsSyncMessage({
+        text: insertedCount > 0
+          ? `뉴스 ${insertedCount}건을 새로 적재했습니다.`
+          : fetchedCount > 0
+            ? '수집은 완료됐지만 새로 적재된 뉴스는 없었습니다.'
+            : '수집 요청을 보냈지만 가져온 뉴스가 없었습니다.',
+        isError: false,
+      })
+      await fetchNewsList()
+    } catch (error) {
+      setNewsSyncMessage({
+        text: `뉴스 수집 요청 오류: ${error.message}`,
+        isError: true,
+      })
+    } finally {
+      setNewsSyncing(false)
     }
   }
 
@@ -628,11 +730,24 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         const lastCandle = uniqueFormatted[uniqueFormatted.length - 1];
         setCurrentPrice(lastCandle.close);
         
+        if (chartInterval === '1d' && uniqueFormatted.length > 1) {
+          const prevCandle = uniqueFormatted[uniqueFormatted.length - 2]
+          setPreviousClosePrice(Number(prevCandle.close || 0) || null)
+        } else {
+          setPreviousClosePrice(null)
+        }
+
+        setHasAuthoritativeChangeRate(false)
+
         if (resData.meta && typeof resData.meta.change_rate === 'number') {
+          setHasAuthoritativeChangeRate(true);
           setPriceChangeRate(resData.meta.change_rate);
         } else if (chartInterval === '1d' && uniqueFormatted.length > 1) {
           const prevCandle = uniqueFormatted[uniqueFormatted.length - 2];
-          const change = prevCandle.close !== 0 ? ((lastCandle.close - prevCandle.close) / prevCandle.close) * 100 : 0;
+          const referenceCurrentPrice = Number(resData.meta?.current_price ?? lastCandle.close ?? 0);
+          const previousClose = Number(prevCandle.close || 0);
+          const change = previousClose !== 0 ? ((referenceCurrentPrice - previousClose) / previousClose) * 100 : 0;
+          setHasAuthoritativeChangeRate(false);
           setPriceChangeRate(change);
         } else {
           setPriceChangeRate(0);
@@ -796,6 +911,19 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   }
 
   // 거래소 토글 시 환경값 변경
+  useEffect(() => {
+    if (hasAuthoritativeChangeRate) return
+    if (chartInterval !== '1d') {
+      setPriceChangeRate(0)
+      return
+    }
+    if (!previousClosePrice) return
+    if (!currentPrice) return
+
+    const change = ((Number(currentPrice) - Number(previousClosePrice)) / Number(previousClosePrice)) * 100
+    setPriceChangeRate(Number.isFinite(change) ? change : 0)
+  }, [currentPrice, previousClosePrice, chartInterval, hasAuthoritativeChangeRate])
+
   const handleExchangeChange = (newEx, newEnv = 'REAL') => {
     // 가상자산은 Real만 가용하므로 항상 통과, 주식의 경우 KIS MOCK은 기본 제공 폴백이므로 항상 통과
     const isMockKis = newEx === 'KIS' && newEnv === 'MOCK'
@@ -826,6 +954,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   })
 
   useEffect(() => {
+    setNewsSyncMessage({ text: '', isError: false })
     fetchCandles()
     fetchUserBalance()
     fetchNewsList()
@@ -836,6 +965,10 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     loadBrokerAvailability()
     loadTradeHoldingContext()
   }, [symbol])
+
+  useEffect(() => {
+    loadFavoriteStatus()
+  }, [isLoggedIn, symbol, resolvedAssetType, exchange])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1183,7 +1316,21 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
               </span>
             </div>
             <h1 className="text-xl font-bold font-mono text-white mt-1.5 flex items-center gap-2">
-              {displayName !== symbol ? `${displayName} (${symbol})` : symbol} <span className="text-xs text-slate-400 font-normal">({resolvedAssetType === 'STOCK' ? '주식' : '가상자산'})</span>
+              {displayName !== symbol ? `${displayName} (${symbol})` : symbol}{' '}
+              <span className="text-xs text-slate-400 font-normal">
+                ({resolvedAssetType === 'STOCK' ? '주식' : '가상자산'})
+              </span>
+              <button
+                type="button"
+                onClick={handleToggleFavorite}
+                className={`text-[22px] leading-none transition ml-1.5 cursor-pointer focus:outline-none ${
+                  isFavorite ? 'text-red-400 hover:text-red-300' : 'text-slate-400 hover:text-cyan-400'
+                }`}
+                aria-label="즐겨찾기"
+                aria-pressed={isFavorite}
+              >
+                {isFavorite ? '♥' : '♡'}
+              </button>
             </h1>
             <p className="mt-2 text-[10px] text-slate-500 font-mono">
               {showLevel2Panel
@@ -1343,8 +1490,23 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                       ))}
                     </>
                   ) : (
-                    <div className="py-8 text-center text-xs text-slate-500 font-mono">
-                      해당 종목의 실시간 수집 뉴스가 존재하지 않습니다.
+                    <div className="flex flex-col items-center gap-3 py-8 text-center">
+                      <p className="text-xs text-slate-500 font-mono">
+                        해당 종목의 실시간 수집 뉴스가 존재하지 않습니다.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleRequestNewsSync}
+                        disabled={newsSyncing}
+                        className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-[11px] font-bold text-cyan-300 transition hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {newsSyncing ? '뉴스 수집 요청 중...' : '뉴스 수집 요청하기'}
+                      </button>
+                      {newsSyncMessage.text ? (
+                        <p className={`max-w-[320px] text-[11px] leading-5 ${newsSyncMessage.isError ? 'text-rose-300' : 'text-cyan-300'}`}>
+                          {newsSyncMessage.text}
+                        </p>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1381,17 +1543,30 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-300">AI Signal</span>
                   <h2 className="mt-1 text-xs font-bold text-white">ML 참고 신호</h2>
                 </div>
-                <button
-                  type="button"
-                  onClick={fetchMlSignal}
-                  disabled={mlSignalLoading}
-                  className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-950/30 disabled:opacity-50"
-                >
-                  {mlSignalLoading ? '조회 중' : '갱신'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsMlSignalExpanded((prev) => !prev)}
+                    className="rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-300 transition hover:border-cyan-500/30 hover:text-white"
+                  >
+                    {isMlSignalExpanded ? '접기' : '펼치기'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchMlSignal}
+                    disabled={mlSignalLoading}
+                    className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-950/30 disabled:opacity-50"
+                  >
+                    {mlSignalLoading ? '조회 중' : '갱신'}
+                  </button>
+                </div>
               </div>
 
-              {mlSignalLoading ? (
+              {!isMlSignalExpanded ? (
+                <div className="rounded border border-[#1f2945] bg-[#070b19] px-3 py-3 text-[11px] leading-5 text-slate-400">
+                  펼쳐서 ML 참고 신호를 확인할 수 있습니다.
+                </div>
+              ) : mlSignalLoading ? (
                 <div className="rounded border border-[#1f2945] bg-[#070b19] px-3 py-4 text-center text-[11px] font-mono text-cyan-300">
                   활성 모델 신호 확인 중...
                 </div>
@@ -1823,9 +1998,6 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                 <div className="flex flex-col gap-2.5 rounded border border-amber-400/40 bg-amber-400/10 px-3 py-3 text-xs">
                   <div className="flex items-center justify-between gap-3">
                     <span className="font-bold text-amber-300">거래내역 기준 추정 보유</span>
-                    <span className="rounded border border-amber-400/40 px-2 py-0.5 text-[10px] font-bold text-amber-200">
-                      실잔고 미확인
-                    </span>
                   </div>
                   <div className="flex justify-between border-b border-amber-400/20 py-1">
                     <span className="text-slate-300">추정 수량</span>

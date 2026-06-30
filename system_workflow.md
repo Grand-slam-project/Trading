@@ -1,155 +1,227 @@
-# Toss 메인 AI 트레이딩 시스템 흐름도 (System Workflow Guide)
+# 시스템 흐름 문서
 
-본 문서는 Toss증권 Open API 및 코인원 API를 주요 거래소로 활용하는 AI 기반 트레이딩 보조 시스템의 데이터 아키텍처, 핵심 데이터 흐름, 주문 승인 단계, 그리고 스케줄러와 분산 락의 작동 메커니즘을 시각적으로 설명하여 모든 팀원들이 개발 및 운영 시 참고할 수 있도록 돕는 시스템 가이드라인입니다.
+본 문서는 현재 코드 기준의 실제 시스템 흐름을 정리합니다.
+특히 `app.py`와 `worker.py`의 역할 분리, `active_locks` 분산 락, `token_caches` 토큰 캐시, `NAVER/FINNHUB` 뉴스 수집 흐름을 기준으로 작성했습니다.
 
----
-
-## 1. 전체 통신 및 데이터 흐름 아키텍처
-
-시스템은 크게 **Vite React (프론트엔드)**, **Flask (API Gateway)**, **독립 Worker (백그라운드 스케줄러)**, **Supabase (데이터베이스 및 Auth)**, 그리고 **외부 거래소/정보 API**의 5가지 레이어로 구성됩니다.
+## 1. 전체 아키텍처
 
 ```mermaid
 graph TD
-    subgraph Frontend [React Frontend]
-        UI[대시보드 / 챗봇 UI]
-        Realtime[Supabase Realtime 구독]
+    subgraph Frontend ["React + Vite Frontend"]
+        Dashboard["Dashboard / AssetDetail / AdminMlData"]
+        SBClient["Supabase Client"]
     end
 
-    subgraph BackendGateway [Flask API Gateway]
-        API[Flask app.py /routes]
-        HomeService[home_service.py]
-        TradeService[toss_client / coinone_client]
+    subgraph Gateway ["Flask API Gateway"]
+        App["backend/app.py"]
+        Routes["home / keys / ml / news / trade"]
     end
 
-    subgraph BackendWorker [Flask 배치 Worker]
-        Worker[worker.py]
-        MLSched[ml_scheduler.py]
-        NewsSched[news_ingest.py]
+    subgraph Worker ["Background Worker"]
+        WorkerMain["backend/worker.py"]
+        MLScheduler["ml_scheduler.py"]
+        MarketScheduler["market_snapshot_scheduler.py"]
+        IndexScheduler["market_index_scheduler.py"]
+        PortfolioScheduler["portfolio_snapshot_scheduler.py"]
     end
 
-    subgraph Database [Supabase DB]
-        DB[(PostgreSQL)]
-        Locks[active_locks 테이블]
-        Tokens[token_caches 테이블]
-        Proposals[trade_proposals 테이블]
+    subgraph Supabase ["Supabase"]
+        DB[(Postgres)]
+        UserKeys["user_api_keys"]
+        TokenCaches["token_caches"]
+        Locks["active_locks"]
+        NewsArticles["news_articles"]
+        Registry["ml_model_registry"]
     end
 
-    subgraph External [외부 거래소 & API]
-        Toss[Toss증권 API]
-        Coinone[코인원 API]
-        Binance[바이낸스 API]
-        Tavily[Tavily News API]
+    subgraph External ["External APIs"]
+        Toss["Toss"]
+        KIS["KIS"]
+        Coinone["Coinone"]
+        Binance["Binance"]
+        Naver["Naver News"]
+        Finnhub["Finnhub"]
     end
 
-    %% 프론트엔드 - 백엔드 통신
-    UI -->|REST API 요청| API
-    Realtime -->|실시간 DB 변동 감지| Proposals
+    Dashboard -->|REST| App
+    Dashboard -->|Auth / 일부 직접 조회| SBClient
+    App --> Routes
+    Routes --> DB
+    Routes --> Toss
+    Routes --> KIS
+    Routes --> Coinone
+    Routes --> Binance
 
-    %% 게이트웨이 - DB 및 외부 API 통신
-    API -->|인증/API Key 복호화| DB
-    API -->|종목조회 / 수동주문| TradeService
-    TradeService -->|Access Token / HMAC 서명| Toss
-    TradeService -->|HMAC-SHA512 주문| Coinone
+    WorkerMain --> MLScheduler
+    WorkerMain --> MarketScheduler
+    WorkerMain --> IndexScheduler
+    WorkerMain --> PortfolioScheduler
 
-    %% 워커 - DB 및 외부 API 통신
-    Worker -->|스케줄러 스레드 기동| MLSched
-    Worker -->|뉴스 수집 기동| NewsSched
-    MLSched -->|RPC 분산 락 획득 시도| DB
-    MLSched -->|캔들 다운로드| Binance
-    MLSched -->|Toss 캔들 다운로드| Toss
-    NewsSched -->|뉴스 수집| Tavily
+    MLScheduler --> Locks
+    MLScheduler --> TokenCaches
+    MLScheduler --> Registry
+    MLScheduler --> Toss
+    MLScheduler --> Binance
 
-    %% 토큰 및 락 관리
-    TradeService <-->|토큰 조회 및 업서트| Tokens
-    MLSched <-->|분산 락 획득/반환| Locks
+    MarketScheduler --> KIS
+    IndexScheduler --> DB
+    PortfolioScheduler --> UserKeys
+    PortfolioScheduler --> Toss
+    PortfolioScheduler --> KIS
+
+    Routes --> NewsArticles
+    MLScheduler --> NewsArticles
+    MLScheduler --> Naver
+    MLScheduler --> Finnhub
 ```
 
----
+## 2. API Gateway와 Worker의 역할 분리
 
-## 2. 사용자 주문 제안 및 실행 승인 흐름 (Human-in-the-Loop)
+### `backend/app.py`
 
-AI 에이전트나 챗봇이 시장을 임의로 판단하여 실거래 주문을 수행하는 리스크를 방지하기 위해, 모든 거래는 **사용자의 명시적 승인**을 거쳐 동작합니다.
+- Flask 앱 생성 및 Blueprint 등록
+- CORS 허용
+- `CryptoHelper`, `NewsRepository`, `NewsIngestService` 등 공용 서비스 인스턴스 바인딩
+- 환경 변수에 따라 일부 스케줄러를 gateway 내부에서 기동 가능
+
+현재 기본 동작에서 중요한 점:
+
+- `SCHEDULER_RUN_IN_GATEWAY=false`가 기본값입니다.
+- 따라서 뉴스 수집, ML 자동화, 홈 마켓 스냅샷, 포트폴리오 스냅샷은 기본적으로 `worker.py`를 별도 실행하는 구조가 기준입니다.
+- `MARKET_INDEX_SCHEDULER_RUN_IN_GATEWAY=true`가 기본값이므로 시장 인덱스 스케줄러는 gateway에서도 유지될 수 있습니다.
+
+### `backend/worker.py`
+
+현재 worker는 다음 스케줄러를 모두 등록합니다.
+
+1. 뉴스 수집 스케줄러
+2. ML 자동화 스케줄러
+3. 홈 마켓 스냅샷 스케줄러
+4. 시장 인덱스 스케줄러
+5. 포트폴리오 스냅샷 스케줄러
+
+운영 문서에서는 "스케줄러는 app.py에서 항상 돈다"라고 적으면 사실과 다릅니다.
+
+## 3. 주문 및 상세 페이지 흐름
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as 사용자 (UI)
-    participant Chatbot as LLM 챗봇 (LangChain)
-    participant Flask as Flask 백엔드 API
-    participant DB as Supabase DB
-    participant Exchange as 외부 거래소 (Toss / 코인원)
+    actor User as 사용자
+    participant FE as AssetDetail.jsx
+    participant API as Flask trade routes
+    participant SB as Supabase
+    participant EX as Exchange API
 
-    User->>Chatbot: "삼성전자 10주 매수 제안해줘"
-    Chatbot->>Flask: 주문 사전검증 요청 (Buying Power, 수량 체크)
-    Flask-->>Chatbot: 검증 성공 및 예상 금액 반환
-    Chatbot->>DB: trade_proposals 테이블에 PENDING 상태로 주문 제안 등록
-    Note over User, DB: 프론트엔드는 Realtime 기능으로 trade_proposals를 실시간 구독하고 있음
-    DB-->>User: 챗봇 창에 [승인 / 거절] 액션 카드 자동 노출
-    
-    rect rgba(6, 182, 212, 0.15)
-        Note over User, Exchange: 최종 주문 승인 및 실행 단계
-        User->>Flask: [승인] 버튼 클릭 (주문 실행 API 호출)
-        Flask->>DB: 사용자의 암호화된 API Key 조회 및 대칭키 복호화
-        Flask->>DB: 해당 주문의 멱등성 clientOrderId 검증 및 status = RUNNING 변경
-        Flask->>Exchange: 최종 복호화된 토큰/서명으로 실거래 주문 전송
-        Exchange-->>Flask: 주문 접수/체결 완료 응답
-        Flask->>DB: trade_proposals 상태를 SUCCESS(또는 FAILED)로 갱신
-        DB-->>User: 챗봇 화면에 "체결 성공" 상태 반영 및 계좌 잔고 갱신
-    end
+    User->>FE: 종목 상세 진입
+    FE->>API: GET /api/chart/candles
+    FE->>API: GET /api/chart/orderbook
+    FE->>API: GET /api/chart/trades
+    API->>EX: 거래소 시세/호가/체결 조회
+    EX-->>API: 응답
+    API-->>FE: 차트/호가/체결 + meta.source
+
+    User->>FE: 주문 값 입력
+    FE->>API: POST /api/trade/precheck
+    API->>SB: user_api_keys 조회
+    API->>EX: 예수금/보유수량/기준가 조회
+    API-->>FE: 사전검증 결과
+
+    User->>FE: 주문 실행
+    FE->>API: POST /api/trade/order
+    API->>SB: trade_proposals 기록
+    API->>EX: 실제 주문 요청
+    EX-->>API: 주문 결과
+    API->>SB: trade_proposals 상태 갱신
+    API-->>FE: 실행 결과 반환
 ```
 
----
+## 4. 뉴스 수집 흐름
 
-## 3. 백그라운드 스케줄러 독립 기동 및 분산 락 작동 흐름
-
-Gunicorn의 멀티 프로세스(Multi-worker) 환경이나 여러 대의 분산 서버, 혹은 다중 개발자가 참여하는 개발 협업 환경에서 백그라운드 스케줄러(뉴스 수집, ML 자동화 학습 등)가 중복 기동되는 문제를 방지하기 위해 배치 스케줄러를 격리하고 **분산 락(Distributed Lock)**을 구성했습니다.
-
-### 3.1 프로세스 격리 구조
-* **`app.py` (API Gateway)**: `SCHEDULER_RUN_IN_GATEWAY=false`로 설정 시 내부 스레드 스케줄러 구동을 차단하여, 다중 웹서버 프로세스 상에서 스케줄러가 중복 기동되는 버그를 제거합니다.
-* **`worker.py` (독립 워커)**: 오직 1개의 단독 백그라운드 데몬 프로세스로 띄워 모든 주기적 작업 스레드를 중앙 기동합니다.
-
-### 3.2 `active_locks` 테이블 기반 분산 락 시퀀스
+현재 코드 기준 뉴스 공급원은 `NAVER`와 `FINNHUB`입니다.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Worker1 as 백그라운드 스레드 (Worker A)
-    participant Worker2 as 백그라운드 스레드 (Worker B)
-    participant DB as Supabase DB (PostgreSQL)
+    participant Worker as NewsIngestService
+    participant Planner as NewsQueryPlanner
+    participant Naver as Naver API
+    participant Finnhub as Finnhub API
+    participant SB as Supabase
 
-    Worker1->>DB: rpc/acquire_lock("crypto_automation", owner="worker-A", duration=7200)
-    Note over DB: 1. 만료된 기존 락 자동 청소 (expires_at < now)<br>2. active_locks 테이블에 key='crypto_automation' INSERT 시도
-    DB-->>Worker1: TRUE (락 획득 성공)
-    
-    Worker2->>DB: rpc/acquire_lock("crypto_automation", owner="worker-B", duration=7200)
-    Note over DB: active_locks에 key='crypto_automation'이<br>이미 활성 상태로 존재하므로 unique_violation 발생
-    DB-->>Worker2: FALSE (락 획득 실패)
-    Note over Worker2: Worker B는 해당 주기 동작을 건너뛰고<br>상태 변수를 업데이트함
+    Worker->>Planner: 수집 계획 생성
+    Planner-->>Worker: 실행할 쿼리 / 건너뛸 쿼리
 
-    Note over Worker1: Worker A 독점 작업 시작<br>(데이터 수집, Optuna HPO, LightGBM 학습, 감사 레포트 작성 등)
-    
-    Worker1->>DB: rpc/release_lock("crypto_automation", owner="worker-A")
-    Note over DB: key 및 owner가 일치하는 active_locks 행 삭제
-    DB-->>Worker1: TRUE (락 정상 반환)
+    alt NAVER 쿼리
+        Worker->>Naver: 뉴스 검색 요청
+        Naver-->>Worker: 기사 목록
+    else FINNHUB 쿼리
+        Worker->>Finnhub: company-news 요청
+        Finnhub-->>Worker: 기사 목록
+    end
+
+    Worker->>SB: news_articles upsert
+    Worker->>SB: news_fetch_logs insert
 ```
 
----
+현재 구현 특징:
 
-## 4. 토큰 DB 캐싱 패턴 (OAuth 2.0 Token Lifecycle)
+- `watchlist_symbols`에서 일부 종목을 동적으로 가져와 뉴스 쿼리에 반영할 수 있습니다.
+- `news_articles`에는 원문 요약과 AI 요약(`ai_summary`)이 함께 저장됩니다.
+- `POST /api/news/summaries/ensure`로 누락된 요약을 보강할 수 있습니다.
 
-Toss Open API 및 KIS API와 통신하기 위해 백엔드가 발급받는 OAuth 액세스 토큰은 로컬 파일이 아닌 Supabase `token_caches` 테이블에 일원화하여 캐싱 관리합니다.
+## 5. ML 자동화 흐름
 
-1. **토큰 검증**: 백엔드가 API 호출 시 `token_cache_service`를 호출합니다.
-2. **만료 검사**: DB 레코드의 `expired_at`과 현재 시각을 비교하여 캐싱 토큰 사용 가능 여부를 판별합니다.
-3. **만료 시 재발급 및 Upsert**:
-   * 토큰이 만료되었거나 존재하지 않는다면, `toss_client` 또는 `kis_client`가 각 거래소 토큰 갱신 엔드포인트를 호출합니다.
-   * 발급받은 평문 토큰은 `CryptoHelper`의 AES-256 GCM 대칭키 방식을 통해 안전하게 암호화됩니다.
-   * `ON CONFLICT (exchange, broker_env) DO UPDATE` 구문(Upsert)을 사용하여 기존 토큰 레코드를 새로운 암호화 토큰과 만료 일시로 덮어씁니다.
-   * 이를 통해 여러 프로세스가 동시에 기동되더라도 한쪽이 갱신해둔 토큰을 DB에서 안전하게 공유할 수 있습니다.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as ml_scheduler
+    participant Lock as active_locks
+    participant SB as Supabase
+    participant Data as raw CSV
+    participant ML as run_pipeline_bundle.py
 
----
+    Worker->>Lock: distributed_lock 획득 시도
+    alt 락 획득 성공
+        Worker->>Data: 캔들 수집 및 CSV 저장
+        Worker->>ML: 학습/예측/백테스트 실행
+        ML-->>Worker: summary / metrics / predictions
+        Worker->>SB: ml_dataset_jobs 동기화
+        Worker->>SB: ml_training_runs 동기화
+        Worker->>SB: ml_model_registry best-effort 동기화
+        Worker->>Worker: promotion_audit / serving_audit 기록
+    else 락 획득 실패
+        Worker-->>Worker: 이번 주기 건너뜀
+    end
+```
 
-## 5. 팀원을 위한 환경설정 최신화 규칙 (agents.md 21번 조항)
-새로운 연동 API나 스케줄러 기능이 구현되면서 **환경 변수가 신규 추가되거나 갱신될 경우**:
-* **루트 디렉토리의 `.env.example`** 파일에 해당 섹션명, 변수 설명, 교체용 예시값(`replace-me`)을 필수로 기재해야 합니다.
-* 본인 외의 팀원이 변경 사항을 반영하지 않아 발생하는 로컬 빌드 깨짐 현상을 미연에 예방하기 위한 협업 약속입니다.
+현재 코드 기준 사실:
+
+- 자동화 preset 정의 파일은 `backend/services/ml_automation_service.py`입니다.
+- 현재 preset은 `stock-v7-full`, `crypto-v7-full`, `stock-v8-full`, `crypto-v8-full`입니다.
+- 주식 `v11` 모델은 존재하지만 자동화 preset의 기본 버전은 아닙니다.
+- `ml/data/ops/job_history.json`이 1차 작업 이력 저장소입니다.
+- Supabase의 `ml_dataset_jobs`, `ml_training_runs`, `ml_model_registry`는 동기화 대상이지만, 테이블 부재 시에도 흐름이 계속 진행되도록 작성되어 있습니다.
+
+## 6. 토큰 캐시 흐름
+
+현재 Toss/KIS OAuth 토큰은 로컬 파일보다 Supabase `token_caches`를 우선 사용하는 구조입니다.
+
+1. API 호출 전 `token_cache_service` 조회
+2. 유효 토큰이 있으면 복호화해서 사용
+3. 없거나 만료되었으면 거래소에서 재발급
+4. 새 토큰을 암호화해서 `token_caches`에 upsert
+
+문서상 주의:
+
+- 저장소에 `.toss_token_cache.json`, `.kis_token_cache.json` 파일이 남아 있어도, 현재 운영 설명에서는 이것을 기준 토큰 저장소처럼 적지 않는 편이 맞습니다.
+
+## 7. 분산 락 흐름
+
+현재 `backend/services/lock_service.py`는 Supabase `active_locks` 테이블 기반 분산 락을 사용합니다.
+
+- 뉴스 수집: `news_ingest`
+- 코인 자동화: `crypto_automation`
+- 주식 자동화: 코드 내부 주기별 락 키 사용
+
+락 획득 실패 시 예외로 중단하기보다, 해당 주기의 작업을 건너뛰고 다음 사이클을 기다리는 방식입니다.

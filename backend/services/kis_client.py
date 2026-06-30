@@ -16,6 +16,8 @@ _kis_mock_rate_limiter_lock = threading.Lock()
 _last_kis_mock_request_time = 0.0
 KIS_MOCK_MIN_INTERVAL = 0.5  # 초당 3회 한도 방어를 위해 최소 0.5초 간격 유지
 
+DEFAULT_US_RANK_EXCHANGES = ["NAS", "NYS", "AMS"]
+
 
 def _enforce_kis_mock_rate_limit(env: str):
     global _last_kis_mock_request_time
@@ -704,6 +706,150 @@ class KISClient(ExchangeClient):
         rankings.sort(key=lambda row: row["change_rate"], reverse=direction == "up")
         return rankings[:limit]
 
+    def _normalize_overseas_rank_item(self, item: dict, source: str) -> dict | None:
+        symbol = str(item.get("symb") or item.get("ovrs_pdno") or "").strip().upper()
+        if not symbol:
+            return None
+
+        current_price = self._to_float(item.get("last") or item.get("ovrs_now_pric"))
+        change_rate = self._to_float(item.get("rate") or item.get("n_rate"))
+        trading_volume = self._to_float(item.get("tvol") or item.get("a_tvol"))
+        trading_value = self._to_float(item.get("tamt"))
+
+        return {
+            "symbol": symbol,
+            "name": str(item.get("name") or item.get("ename") or symbol).strip(),
+            "market_segment": "US",
+            "market_country": "US",
+            "current_price": current_price,
+            "change_rate": change_rate,
+            "trading_volume": trading_volume,
+            "trading_value": trading_value,
+            "as_of": datetime.utcnow().isoformat() + "Z",
+            "raw": {**item, "_rank_source": source, "_exchange_code": item.get("excd")},
+        }
+
+    def _get_overseas_rankings(
+        self,
+        endpoint: str,
+        tr_id: str,
+        params: dict,
+        source: str,
+        limit: int,
+    ) -> list[dict]:
+        _enforce_kis_mock_rate_limit(self.env)
+        token = self._get_cached_token()
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self.appkey,
+            "appsecret": self.appsecret,
+            "tr_id": tr_id,
+        }
+        res = requests.get(f"{self.base_url}{endpoint}", headers=headers, params=params, timeout=20)
+        if res.status_code != 200:
+            raise Exception(f"KIS overseas ranking failed: {res.text}")
+
+        data = res.json()
+        if data.get("rt_cd") != "0":
+            raise Exception(f"KIS overseas ranking error: {data.get('msg1')}")
+
+        rows = []
+        for item in data.get("output2", []) or []:
+            row = self._normalize_overseas_rank_item(item, source)
+            if row:
+                rows.append(row)
+        return rows[:limit]
+
+    def get_overseas_trade_volume_rankings(self, exchange: str = "NAS", limit: int = 50) -> list[dict]:
+        """
+        KIS 해외주식 거래량 순위 API를 호출합니다.
+        """
+        return self._get_overseas_rankings(
+            endpoint="/uapi/overseas-stock/v1/ranking/trade-vol",
+            tr_id="HHDFS76310010",
+            params={
+                "EXCD": exchange,
+                "NDAY": "0",
+                "VOL_RANG": "0",
+                "KEYB": "",
+                "AUTH": "",
+                "PRC1": "",
+                "PRC2": "",
+            },
+            source=f"KIS_OVERSEAS_TRADE_VOLUME_{exchange}",
+            limit=limit,
+        )
+
+    def get_overseas_updown_rankings(self, direction: str = "up", exchange: str = "NAS", limit: int = 50) -> list[dict]:
+        """
+        KIS 해외주식 상승률/하락률 순위 API를 호출합니다.
+        direction='up'은 상승률 상위, direction='down'은 하락률 하위를 반환합니다.
+        """
+        return self._get_overseas_rankings(
+            endpoint="/uapi/overseas-stock/v1/ranking/updown-rate",
+            tr_id="HHDFS76290000",
+            params={
+                "EXCD": exchange,
+                "NDAY": "0",
+                "GUBN": "1" if direction == "up" else "0",
+                "VOL_RANG": "0",
+                "AUTH": "",
+                "KEYB": "",
+            },
+            source=f"KIS_OVERSEAS_UPDOWN_{direction.upper()}_{exchange}",
+            limit=limit,
+        )
+
+    def get_overseas_rank_candidates(self, limit: int = 50) -> list[dict]:
+        """
+        미국 시장 거래량/상승률/하락률 순위 API를 합쳐 홈 캐시 후보군을 만듭니다.
+        NASDAQ, NYSE, AMEX를 기본 대상으로 조회합니다.
+        """
+        exchanges = [
+            value.strip().upper()
+            for value in os.getenv("KIS_US_RANK_EXCHANGES", ",".join(DEFAULT_US_RANK_EXCHANGES)).split(",")
+            if value.strip()
+        ]
+        collected: list[dict] = []
+        errors: list[str] = []
+        for exchange in exchanges:
+            for fetcher in (
+                lambda exchange=exchange: self.get_overseas_trade_volume_rankings(exchange=exchange, limit=limit),
+                lambda exchange=exchange: self.get_overseas_updown_rankings(direction="up", exchange=exchange, limit=limit),
+                lambda exchange=exchange: self.get_overseas_updown_rankings(direction="down", exchange=exchange, limit=limit),
+            ):
+                try:
+                    collected.extend(fetcher())
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        by_symbol: dict[str, dict] = {}
+        for row in collected:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            previous = by_symbol.get(symbol)
+            if not previous:
+                by_symbol[symbol] = row
+                continue
+            merged = {**previous, **row}
+            merged["trading_volume"] = max(
+                self._to_float(previous.get("trading_volume")),
+                self._to_float(row.get("trading_volume")),
+            )
+            merged["trading_value"] = max(
+                self._to_float(previous.get("trading_value")),
+                self._to_float(row.get("trading_value")),
+            )
+            by_symbol[symbol] = merged
+
+        rows = list(by_symbol.values())
+        rows.sort(key=lambda row: row.get("trading_volume", 0), reverse=True)
+        if not rows and errors:
+            raise Exception("KIS overseas rank candidates failed: " + "; ".join(errors[:5]))
+        return rows
+
     def get_market_rank_candidates(self, limit: int = 50) -> list[dict]:
         """
         거래대금/거래량 후보와 상승률/하락률 후보를 합쳐 DB 캐시 업서트용 후보군을 만듭니다.
@@ -848,6 +994,8 @@ class KISClient(ExchangeClient):
         return {
             "total_evaluation": total_eval,
             "available_cash": available_cash,
+            "available_cash_currency": "KRW",
+            "available_cash_supported": True,
             "currency": "KRW",
             "holdings": holdings
         }
@@ -1101,6 +1249,159 @@ class KISClient(ExchangeClient):
             quantity=quantity,
             ord_type=ord_type,
         )
+
+    def get_daily_order_executions(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        symbol: str = "",
+        order_id: str = "",
+    ) -> list[dict]:
+        """
+        KIS 국내주식 계좌 일별 주문체결 내역을 조회합니다.
+        """
+        _enforce_kis_mock_rate_limit(self.env)
+        today = datetime.now(KST).strftime("%Y%m%d")
+        start = start_date or today
+        end = end_date or today
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+        token = self._get_cached_token()
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": self.appkey,
+            "appsecret": self.appsecret,
+            "tr_id": "TTTC0081R" if self.env == "REAL" else "VTTC0081R",
+        }
+        params = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "INQR_STRT_DT": start,
+            "INQR_END_DT": end,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": symbol or "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": order_id or "",
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+        executions = []
+
+        for _ in range(10):
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            if res.status_code != 200:
+                raise Exception(f"KIS daily executions failed: {res.text}")
+
+            data = res.json()
+            if data.get("rt_cd") != "0":
+                raise Exception(f"KIS daily executions error: {data.get('msg1')}")
+
+            page_rows = data.get("output1", []) or data.get("output", []) or []
+            if isinstance(page_rows, dict):
+                page_rows = [page_rows]
+
+            for row in page_rows:
+                row_order_id = str(row.get("odno") or row.get("ODNO") or "").strip()
+                row_symbol = str(row.get("pdno") or row.get("PDNO") or "").strip()
+                order_qty = self._to_float(row.get("ord_qty") or row.get("ORD_QTY"))
+                executed_qty = self._to_float(
+                    row.get("tot_ccld_qty")
+                    or row.get("TOT_CCLD_QTY")
+                    or row.get("ccld_qty")
+                    or row.get("CCLD_QTY")
+                )
+                remaining_qty = self._to_float(row.get("nccs_qty") or row.get("NCCS_QTY"))
+                avg_price = self._to_float(
+                    row.get("avg_prvs")
+                    or row.get("AVG_PRVS")
+                    or row.get("ord_unpr")
+                    or row.get("ORD_UNPR")
+                )
+                cancel_yn = str(row.get("cncl_yn") or row.get("CNCL_YN") or "").upper()
+
+                executions.append({
+                    "order_id": row_order_id,
+                    "symbol": row_symbol,
+                    "name": row.get("prdt_name") or row.get("PRDT_NAME") or "",
+                    "side_code": row.get("sll_buy_dvsn_cd") or row.get("SLL_BUY_DVSN_CD") or "",
+                    "order_qty": order_qty,
+                    "executed_qty": executed_qty,
+                    "remaining_qty": remaining_qty,
+                    "avg_price": avg_price,
+                    "canceled": cancel_yn == "Y",
+                    "raw": row,
+                })
+
+            next_fk100 = str(data.get("ctx_area_fk100") or data.get("CTX_AREA_FK100") or "").strip()
+            next_nk100 = str(data.get("ctx_area_nk100") or data.get("CTX_AREA_NK100") or "").strip()
+            tr_cont = str(res.headers.get("tr_cont") or res.headers.get("Tr_Cont") or "").upper()
+            if not next_fk100 and not next_nk100:
+                break
+            if tr_cont and tr_cont not in {"M", "F"}:
+                break
+            params["CTX_AREA_FK100"] = next_fk100
+            params["CTX_AREA_NK100"] = next_nk100
+
+        return executions
+
+    def get_order_execution_status(self, order_id: str, symbol: str = "", lookback_days: int = 7) -> dict:
+        """
+        주문번호 기준으로 계좌 주문체결 상태를 조회합니다.
+        """
+        end_dt = datetime.now(KST)
+        start_dt = end_dt - timedelta(days=lookback_days)
+        executions = self.get_daily_order_executions(
+            start_date=start_dt.strftime("%Y%m%d"),
+            end_date=end_dt.strftime("%Y%m%d"),
+            symbol=symbol,
+            order_id=order_id,
+        )
+        target_order_id = str(order_id or "").strip()
+        target_symbol = str(symbol or "").strip().upper()
+        matched = [
+            item for item in executions
+            if (not target_order_id or item.get("order_id") == target_order_id)
+            and (not target_symbol or str(item.get("symbol") or "").upper() == target_symbol)
+        ]
+        if not matched:
+            return {
+                "order_id": target_order_id,
+                "symbol": target_symbol,
+                "status": "UNKNOWN",
+                "order_qty": 0.0,
+                "executed_qty": 0.0,
+                "remaining_qty": 0.0,
+                "canceled": False,
+                "raw": [],
+            }
+
+        order_qty = max((item.get("order_qty") or 0) for item in matched)
+        executed_qty = sum(item.get("executed_qty") or 0 for item in matched)
+        remaining_qty = max(order_qty - executed_qty, 0)
+        canceled = any(item.get("canceled") for item in matched)
+        if canceled:
+            status = "CANCELED"
+        elif order_qty > 0 and executed_qty >= order_qty:
+            status = "EXECUTED"
+        elif executed_qty > 0:
+            status = "PARTIALLY_FILLED"
+        else:
+            status = "ORDERED"
+
+        return {
+            "order_id": target_order_id,
+            "symbol": target_symbol,
+            "status": status,
+            "order_qty": order_qty,
+            "executed_qty": executed_qty,
+            "remaining_qty": remaining_qty,
+            "canceled": canceled,
+            "raw": matched,
+        }
 
     def get_order_status(self, order_id: str) -> dict:
         return {

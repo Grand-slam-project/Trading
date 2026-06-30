@@ -10,6 +10,7 @@ import AdminMlData from './AdminMlData.jsx'
 
 const DASHBOARD_API_BASE_URL = 'http://localhost:5050'
 const BALANCE_EXCHANGE_ORDER = ['TOSS', 'KIS', 'COINONE', 'BINANCE']
+const TRADE_PROPOSAL_HOLDING_FIELDS = 'id,exchange,asset_type,ticker,symbol,side,price,volume,order_amount,market_country,currency,status,broker_env,created_at'
 
 const toNumber = (value) => {
   const numericValue = Number(value)
@@ -40,6 +41,66 @@ const formatCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate =
     return `$${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   }
   return `₩${Math.round(numeric).toLocaleString()}`
+}
+
+const formatNullableCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate = 1500) => {
+  if (value === null || value === undefined || value === '') return '-'
+  return formatCurrency(value, currency, displayCurrency, exchangeRate)
+}
+
+const formatNativeCurrency = (value, currency) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '-'
+  if (currency === 'USD' || currency === 'USDT') {
+    return `$${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
+  if (currency === 'KRW') {
+    return `₩${Math.round(numeric).toLocaleString()}`
+  }
+  return `${numeric.toLocaleString()} ${currency}`
+}
+
+const getAccountDisplayLabel = (item = {}) => {
+  const exchange = String(item.raw_exchange || item.exchange || '-').toUpperCase()
+  const env = String(item.env || '').toUpperCase()
+  if (!env) return exchange
+  return `${exchange} ${env === 'MOCK' ? '모의' : '실거래'}`
+}
+
+const getAccountTone = (exchange = '') => {
+  const normalized = String(exchange || '').toUpperCase()
+  if (normalized.includes('TOSS')) return 'border-cyan-500/30 bg-cyan-950/20'
+  if (normalized.includes('KIS')) return 'border-blue-500/30 bg-blue-950/20'
+  if (normalized.includes('COINONE')) return 'border-amber-500/30 bg-amber-950/20'
+  if (normalized.includes('BINANCE')) return 'border-emerald-500/30 bg-emerald-950/20'
+  return 'border-slate-700/80 bg-slate-900/70'
+}
+
+const buildCashEntriesFromItem = (item = {}) => {
+  const sourceLabel = getAccountDisplayLabel(item)
+  const cashCurrency = String(item.available_cash_currency || item.currency || 'KRW').toUpperCase()
+  const rawComponents = Array.isArray(item.available_cash_details?.components) && item.available_cash_details.components.length > 0
+    ? item.available_cash_details.components
+    : (
+      item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '' && Number.isFinite(Number(item.available_cash))
+        ? [{ currency: cashCurrency, cash_buying_power: Number(item.available_cash) }]
+        : []
+    )
+
+  return rawComponents
+    .map((component) => {
+      const currency = String(component?.currency || cashCurrency).toUpperCase()
+      const amount = Number(component?.cash_buying_power)
+      if (!currency || !Number.isFinite(amount)) return null
+      return {
+        currency,
+        amount,
+        sourceLabel,
+        exchange: String(item.raw_exchange || item.exchange || '').toUpperCase(),
+        env: String(item.env || '').toUpperCase(),
+      }
+    })
+    .filter(Boolean)
 }
 
 const parsePriceNumber = (value) => {
@@ -82,11 +143,11 @@ const getHoldingMarketType = (holding = {}) => {
     return 'overseas'
   }
 
-  if (/DOMESTIC|KR|KRW|KOSPI|KOSDAQ|국내/.test(combined) || /^\d{6}$/.test(symbol)) {
+  if (/DOMESTIC|KR|KRW|KOSPI|KOSDAQ|국내/.test(combined) || /^[0-9a-zA-Z]{6,7}$/.test(symbol)) {
     return 'domestic'
   }
 
-  return /[A-Z]/.test(symbol) ? 'overseas' : 'domestic'
+  return /[A-Z]/.test(symbol) && !/^[0-9a-zA-Z]{6,7}$/.test(symbol) ? 'overseas' : 'domestic'
 }
 
 const getHoldingEvaluationKrw = (holding = {}, exchangeRate = 1500) => {
@@ -134,22 +195,43 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
   
   let totalEvaluationKrw = 0
   let availableCashKrw = 0
+  let hasCashValue = false
+  const cashAvailableSources = []
+  const cashUnavailableSources = []
+  const cashBreakdown = {}
+  const cashBreakdownEntries = []
   
   const holdings = filteredItems.flatMap((item) => {
     const exchange = item.exchange
     const rate = toNumber(item.exchange_rate) || representativeRate
     const itemCurrency = item.currency || 'KRW'
+    const cashCurrency = item.available_cash_currency || itemCurrency
     
     let itemEval = toNumber(item.total_evaluation)
-    let itemCash = toNumber(item.available_cash)
     
     if (itemCurrency === 'USD' || itemCurrency === 'USDT') {
       itemEval = itemEval * rate
-      itemCash = itemCash * rate
     }
     
     totalEvaluationKrw += itemEval
-    availableCashKrw += itemCash
+
+    if (item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '' && Number.isFinite(Number(item.available_cash))) {
+      let itemCash = Number(item.available_cash)
+      if (cashCurrency === 'USD' || cashCurrency === 'USDT') {
+        itemCash = itemCash * rate
+      }
+      availableCashKrw += itemCash
+      hasCashValue = true
+      cashAvailableSources.push(exchange)
+    } else {
+      cashUnavailableSources.push(exchange)
+    }
+
+    const cashEntries = buildCashEntriesFromItem(item)
+    for (const entry of cashEntries) {
+      cashBreakdown[entry.currency] = (cashBreakdown[entry.currency] || 0) + entry.amount
+      cashBreakdownEntries.push(entry)
+    }
     
     return (item.holdings || []).map((holding) => ({
       ...holding,
@@ -161,11 +243,136 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
 
   return {
     total_evaluation: totalEvaluationKrw,
-    available_cash: availableCashKrw,
+    available_cash: hasCashValue ? availableCashKrw : null,
     currency: 'KRW', // 통합 잔고는 항상 KRW 기준
     exchange_rate: representativeRate,
     holdings,
     sources: filteredItems.map((item) => item.exchange),
+    cash_supported_sources: [...new Set(cashAvailableSources)],
+    cash_unavailable_sources: [...new Set(cashUnavailableSources)],
+    available_cash_breakdown: cashBreakdown,
+    available_cash_breakdown_entries: cashBreakdownEntries,
+  }
+}
+
+const getHoldingIdentity = (holding = {}) => {
+  const symbol = String(holding.symbol || holding.ticker || holding.id || '').trim().toUpperCase()
+  const exchangeText = String(holding.raw_exchange || holding.exchange || holding.account_type || '').toUpperCase()
+  const rawExchange = exchangeText.includes('KIS') ? 'KIS'
+    : exchangeText.includes('TOSS') ? 'TOSS'
+      : exchangeText.includes('COINONE') ? 'COINONE'
+        : exchangeText.includes('BINANCE') ? 'BINANCE'
+          : exchangeText
+  const env = String(holding.env || (exchangeText.includes('모의') ? 'MOCK' : exchangeText.includes('실전') ? 'REAL' : 'REAL')).toUpperCase()
+  const assetType = String(holding.asset_type || (['COINONE', 'BINANCE'].includes(rawExchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
+  return symbol ? `${assetType}:${rawExchange}:${env}:${symbol}` : ''
+}
+
+const fetchTradeSymbolNameMap = async (tradeRows = []) => {
+  const symbols = Array.from(new Set(
+    tradeRows
+      .map((row) => String(row.symbol || row.ticker || '').trim().toUpperCase())
+      .filter(Boolean),
+  ))
+
+  if (symbols.length === 0) return {}
+
+  const pairs = await Promise.all(
+    symbols.map(async (symbol) => {
+      try {
+        const response = await fetch(`${DASHBOARD_API_BASE_URL}/api/symbol/lookup?query=${encodeURIComponent(symbol)}`)
+        const payload = await response.json()
+        const displayName = payload?.success ? payload.data?.display_name : ''
+        return [symbol, displayName || symbol]
+      } catch {
+        return [symbol, symbol]
+      }
+    }),
+  )
+
+  return Object.fromEntries(pairs)
+}
+
+const buildEstimatedHoldingsFromTrades = (tradeRows = [], liveHoldings = [], showMockAssets = true) => {
+  const liveKeys = new Set(liveHoldings.map(getHoldingIdentity).filter(Boolean))
+  if (tradeRows.some((row) => row.source === 'DB_ESTIMATED')) {
+    return tradeRows.filter((item) => item.qty > 0 && (showMockAssets || item.env !== 'MOCK') && !liveKeys.has(getHoldingIdentity(item)))
+  }
+  const grouped = new Map()
+
+  tradeRows.forEach((row) => {
+    const status = String(row.status || '').toUpperCase()
+    const env = String(row.broker_env || 'REAL').toUpperCase()
+    if (status !== 'EXECUTED') return
+    if (!showMockAssets && env === 'MOCK') return
+
+    const symbol = String(row.symbol || row.ticker || '').trim().toUpperCase()
+    if (!symbol) return
+
+    const exchange = String(row.exchange || '').toUpperCase()
+    const assetType = String(row.asset_type || (['COINONE', 'BINANCE'].includes(exchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
+    const key = `${assetType}:${exchange}:${env}:${symbol}`
+    const side = String(row.side || '').toUpperCase()
+    const price = toNumber(row.price)
+    const volume = toNumber(row.volume) || (price > 0 ? toNumber(row.order_amount) / price : 0)
+    if (volume <= 0) return
+
+    const current = grouped.get(key) || {
+      symbol,
+      name: row.display_name || symbol,
+      asset_type: assetType,
+      exchange: exchange === 'KIS' ? `KIS ${env === 'MOCK' ? '모의' : '실전'}` : (exchange || '-'),
+      raw_exchange: exchange || '-',
+      account_type: exchange ? `${exchange} ${env === 'MOCK' ? '모의' : '실전'}` : '-',
+      env,
+      currency: row.currency || (exchange === 'BINANCE' ? 'USD' : 'KRW'),
+      qty: 0,
+      buyQty: 0,
+      buyAmount: 0,
+      lastPrice: 0,
+    }
+
+    if (side === 'SELL') {
+      current.qty -= volume
+    } else {
+      current.qty += volume
+      current.buyQty += volume
+      current.buyAmount += price * volume
+    }
+    if (price > 0) current.lastPrice = price
+    grouped.set(key, current)
+  })
+
+  return Array.from(grouped.values())
+    .filter((item) => item.qty > 0 && !liveKeys.has(getHoldingIdentity(item)))
+    .map((item) => {
+      const avgPrice = item.buyQty > 0 ? item.buyAmount / item.buyQty : item.lastPrice
+      const currentPrice = item.lastPrice || avgPrice
+      return {
+        symbol: item.symbol,
+        name: item.name,
+        qty: item.qty,
+        avg_price: avgPrice,
+        current_price: currentPrice,
+        profit: 0,
+        profit_rate: 0,
+        currency: item.currency,
+        exchange: item.exchange,
+        raw_exchange: item.raw_exchange,
+        account_type: item.account_type,
+        asset_type: item.asset_type,
+        env: item.env,
+        source: 'DB_ESTIMATED',
+      }
+    })
+}
+
+const mergeBalanceWithTradeEstimates = (mergedBalance, tradeRows = [], showMockAssets = true) => {
+  const holdings = Array.isArray(mergedBalance?.holdings) ? mergedBalance.holdings : []
+  const estimatedHoldings = buildEstimatedHoldingsFromTrades(tradeRows, holdings, showMockAssets)
+  return {
+    ...mergedBalance,
+    holdings: [...holdings, ...estimatedHoldings],
   }
 }
 
@@ -175,6 +382,16 @@ const getBalanceRequestLabel = (exchange, env) => {
   }
 
   return exchange
+}
+
+const getBalanceAccountLabel = (exchange, env, account = {}) => {
+  const baseLabel = getBalanceRequestLabel(exchange, env)
+  const accountNo = exchange === 'KIS'
+    ? account.kis_account_no
+    : exchange === 'TOSS'
+      ? account.toss_account_no
+      : ''
+  return accountNo ? `${baseLabel} ${accountNo}` : baseLabel
 }
 
 const buildBalanceRequests = (keyStatus) =>
@@ -191,7 +408,7 @@ const buildBalanceRequests = (keyStatus) =>
       return {
         exchange,
         env,
-        label: getBalanceRequestLabel(exchange, env),
+        label: getBalanceAccountLabel(exchange, env, account),
       }
     })
   })
@@ -213,6 +430,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   const [balanceLoading, setBalanceLoading] = useState(false)
   const [showMockAssets, setShowMockAssets] = useState(true)
   const [rawBalances, setRawBalances] = useState([])
+  const [executedTradeRows, setExecutedTradeRows] = useState([])
   const [dashboardWatchlist, setDashboardWatchlist] = useState([])
   const [watchlistLoading, setWatchlistLoading] = useState(false)
   const [watchlistError, setWatchlistError] = useState('')
@@ -239,6 +457,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   const [balanceError, setBalanceError] = useState('')
 
   const [displayCurrency, setDisplayCurrency] = useState('KRW')
+  const [isCashDetailModalOpen, setIsCashDetailModalOpen] = useState(false)
 
   const handleInputChange = (e) => {
     const { name, value } = e.target
@@ -349,8 +568,65 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
 
       const failedResults = results.filter((item) => item?.error)
       const successResults = results.filter((item) => !item?.error)
+      try {
+        await fetch(`${DASHBOARD_API_BASE_URL}/api/trade/orders/sync-status`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: authHeader,
+          },
+        })
+      } catch {
+        // 거래내역 상태 동기화 실패는 잔고 조회 자체를 막지 않습니다.
+      }
+
+      let tradeRows = []
+      const { data: proposalRows, error: proposalError } = await supabase
+        .from('trade_proposals')
+        .select(TRADE_PROPOSAL_HOLDING_FIELDS)
+        .eq('status', 'EXECUTED')
+        .order('created_at', { ascending: true })
+
+      if (proposalError) {
+        setBalanceError(`거래내역 보정 조회 실패: ${proposalError.message}`)
+      } else {
+        const baseRows = proposalRows || []
+        const symbolNameMap = await fetchTradeSymbolNameMap(baseRows)
+        tradeRows = baseRows.map((row) => {
+          const symbol = String(row.symbol || row.ticker || '').trim().toUpperCase()
+          return {
+            ...row,
+            display_name: symbolNameMap[symbol] || symbol,
+          }
+        })
+      }
+
+      try {
+        const estimatedResponse = await fetch(`${DASHBOARD_API_BASE_URL}/api/trade/estimated-holdings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: authHeader,
+          },
+          body: JSON.stringify({ show_mock_assets: showMockAssets }),
+        })
+        const estimatedPayload = await estimatedResponse.json()
+        if (estimatedResponse.ok && estimatedPayload.success) {
+          tradeRows = estimatedPayload.data?.holdings || []
+        } else {
+          setBalanceError(estimatedPayload.message || '거래내역 기반 보유종목 보정 조회에 실패했습니다.')
+        }
+      } catch (error) {
+        setBalanceError(`거래내역 기반 보유종목 보정 조회 실패: ${error.message}`)
+      }
+
+      setExecutedTradeRows(tradeRows)
       setRawBalances(successResults)
-      const mergedBalance = mergeAccountBalances(successResults, showMockAssets)
+      const mergedBalance = mergeBalanceWithTradeEstimates(
+        mergeAccountBalances(successResults, showMockAssets),
+        tradeRows,
+        showMockAssets,
+      )
       setBalance(mergedBalance)
 
       if (mergedBalance.sources.length === 0) {
@@ -400,9 +676,13 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
 
   useEffect(() => {
     if (rawBalances.length > 0) {
-      setBalance(mergeAccountBalances(rawBalances, showMockAssets))
+      setBalance(mergeBalanceWithTradeEstimates(
+        mergeAccountBalances(rawBalances, showMockAssets),
+        executedTradeRows,
+        showMockAssets,
+      ))
     }
-  }, [rawBalances, showMockAssets])
+  }, [rawBalances, showMockAssets, executedTradeRows])
 
   const refreshBalance = async () => {
     if (!encrypted) {
@@ -506,6 +786,18 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   }
 
   const allocation = getAllocationData()
+  const filteredBalanceAccounts = rawBalances.filter((item) => showMockAssets || item.env !== 'MOCK')
+  const accountCashSummaries = filteredBalanceAccounts.map((item) => ({
+    key: `${item.raw_exchange || item.exchange}-${item.env}`,
+    label: getAccountDisplayLabel(item),
+    tone: getAccountTone(item.raw_exchange || item.exchange),
+    entries: buildCashEntriesFromItem(item),
+    availableCash: item.available_cash,
+    availableCashCurrency: item.available_cash_currency || item.currency || 'KRW',
+    exchangeRate: item.exchange_rate || balance?.exchange_rate || 1500,
+    source: item.available_cash_source || '',
+    supported: item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '',
+  }))
 
   return (
     <div className="min-h-screen bg-obsidian-bg text-[#e2e2ec] font-inter">
@@ -611,10 +903,24 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                 </div>
 
                 <div className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
-                  <span className="text-xs font-bold text-slate-400">가용 예수금 (KRW)</span>
-                  <div className="text-xl font-bold font-mono text-white mt-1">
-                    {balanceLoading ? '조회 중' : formatCurrency(balance?.available_cash, balance?.currency, 'KRW', balance?.exchange_rate)}
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-xs font-bold text-slate-400">가용 예수금 (KRW)</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsCashDetailModalOpen(true)}
+                      className="rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
+                    >
+                      상세 보기
+                    </button>
                   </div>
+                  <div className="text-xl font-bold font-mono text-white mt-1">
+                    {balanceLoading ? '조회 중' : formatNullableCurrency(balance?.available_cash, balance?.currency, 'KRW', balance?.exchange_rate)}
+                  </div>
+                  {balance?.cash_unavailable_sources?.length > 0 ? (
+                    <p className="mt-2 text-[11px] leading-5 text-amber-300/90">
+                      일부 계좌 예수금은 아직 합산되지 않았습니다: {balance.cash_unavailable_sources.join(', ')}
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
@@ -785,11 +1091,12 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                       </thead>
                       <tbody className="divide-y divide-slate-800 font-mono">
                         {getSortedHoldings(balance.holdings).map((stock, index) => {
-                          const isForeign = /[a-zA-Z]/.test(stock.symbol)
+                          const isForeign = /[a-zA-Z]/.test(stock.symbol) && !/^[0-9a-zA-Z]{6,7}$/.test(stock.symbol)
                           const stockCurrency = stock.currency || (isForeign ? 'USD' : 'KRW')
                           const exchangeRate = balance.exchange_rate || 1380
                           const currentDisplayCurrency = isForeign ? displayCurrency : 'KRW'
                           const exchangeName = stock.exchange || stock.account_type || '-'
+                          const profitRate = Number(stock.profit_rate)
 
                           return (
                             <tr key={`${exchangeName}-${stock.env || 'REAL'}-${stock.symbol}-${index}`} className="hover:bg-slate-800/40 transition-colors">
@@ -813,7 +1120,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                                 {stock.profit > 0 ? '+' : ''}{formatCurrency(stock.profit, stockCurrency, currentDisplayCurrency, exchangeRate)}
                               </td>
                               <td className={`py-3 px-3 text-right font-semibold`}>
-                                <Rate value={(stock.profit_rate >= 0 ? '+' : '') + stock.profit_rate.toFixed(2) + '%'} />
+                                <Rate value={(profitRate >= 0 ? '+' : '') + (Number.isFinite(profitRate) ? profitRate.toFixed(2) : '0.00') + '%'} />
                               </td>
                             </tr>
                           )
@@ -833,6 +1140,67 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
               </div>
             </main>
           )}
+
+          {isCashDetailModalOpen ? (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 px-4 py-8 backdrop-blur-sm">
+              <div className="w-full max-w-4xl rounded-2xl border border-slate-700/80 bg-[#0b1220] p-5 shadow-2xl">
+                <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-3">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-300">Cash Detail</p>
+                    <h2 className="mt-1 text-base font-bold text-white">거래소별 + 통화별 예수금 상세</h2>
+                    <p className="mt-1 text-xs text-slate-400">토스는 공식 `buying-power`, 한투는 계좌 예수금 응답 기준으로 표시합니다.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsCashDetailModalOpen(false)}
+                    className="rounded border border-slate-700 px-3 py-1.5 text-xs font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
+                  >
+                    닫기
+                  </button>
+                </div>
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead className="border-b border-slate-800 bg-[#0c0e15]/60 text-slate-400">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-bold">계좌</th>
+                        <th className="px-3 py-2 text-left font-bold">통화</th>
+                        <th className="px-3 py-2 text-right font-bold">원금액</th>
+                        <th className="px-3 py-2 text-right font-bold">KRW 환산</th>
+                        <th className="px-3 py-2 text-left font-bold">소스</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/50">
+                      {accountCashSummaries.flatMap((account) => (
+                        account.entries.length > 0
+                          ? account.entries.map((entry, index) => (
+                            <tr key={`${account.key}-${entry.currency}-${index}`} className="hover:bg-slate-900/40">
+                              <td className="px-3 py-3 font-bold text-white">{account.label}</td>
+                              <td className="px-3 py-3 text-slate-300">{entry.currency}</td>
+                              <td className="px-3 py-3 text-right font-mono text-slate-200">{formatNativeCurrency(entry.amount, entry.currency)}</td>
+                              <td className="px-3 py-3 text-right font-mono text-cyan-300">
+                                {formatCurrency(entry.amount, entry.currency, 'KRW', account.exchangeRate)}
+                              </td>
+                              <td className="px-3 py-3 text-slate-500">{account.source || '-'}</td>
+                            </tr>
+                          ))
+                          : [{
+                            key: `${account.key}-empty`,
+                            label: account.label,
+                            source: account.source || '-',
+                          }].map((empty) => (
+                            <tr key={empty.key} className="hover:bg-slate-900/40">
+                              <td className="px-3 py-3 font-bold text-white">{empty.label}</td>
+                              <td className="px-3 py-3 text-slate-500" colSpan={3}>표시 가능한 통화별 예수금 없음</td>
+                              <td className="px-3 py-3 text-slate-500">{empty.source}</td>
+                            </tr>
+                          ))
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {activeTab === 'watchlist' && <WatchlistTab displayCurrency={displayCurrency} exchangeRate={balance?.exchange_rate} />}
           {activeTab === 'assets' && <AssetsTab balance={balance} allocation={allocation} displayCurrency={displayCurrency} exchangeRate={balance?.exchange_rate} showMockAssets={showMockAssets} />}

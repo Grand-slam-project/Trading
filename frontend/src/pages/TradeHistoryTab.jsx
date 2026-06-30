@@ -21,18 +21,29 @@ const formatCurrency = (value, currency = 'KRW') => {
 
 const mapTradeStatus = (status) => {
   const normalizedStatus = String(status || '').toUpperCase()
-  if (['PENDING', 'APPROVED'].includes(normalizedStatus)) return '미체결'
+  if (['PENDING', 'APPROVED', 'OPEN', 'ORDERED', 'PARTIALLY_FILLED'].includes(normalizedStatus)) return '미체결'
   if (normalizedStatus === 'EXECUTED') return '체결완료'
   if (normalizedStatus === 'REJECTED') return '거절'
   if (normalizedStatus === 'FAILED') return '실패'
-  if (normalizedStatus === 'CANCELED') return '취소완료'
+  if (['CANCELED', 'CANCELLED'].includes(normalizedStatus)) return '취소완료'
   if (normalizedStatus === 'MODIFIED') return '미체결'
   return normalizedStatus || '-'
 }
 
 const mapTradeSide = (side) => (String(side || '').toUpperCase() === 'SELL' ? '매도' : '매수')
 
+const isMissingBrokerHistoryTableError = (error) => {
+  const message = String(error?.message || error?.details || error?.hint || '').toLowerCase()
+  return message.includes('broker_order_history') && (
+    message.includes('not found')
+    || message.includes('does not exist')
+    || message.includes('could not find')
+    || message.includes('pgrst')
+  )
+}
+
 const TRADE_HISTORY_SELECT_FIELDS = 'id,exchange,asset_type,ticker,symbol,side,price,volume,order_amount,ord_type,market_country,currency,broker_env,client_order_id,external_order_id,external_order_org_no,status,failure_reason,created_at'
+const BROKER_HISTORY_SELECT_FIELDS = 'id,exchange,broker_env,symbol,market_country,side,price,quantity,order_amount,status,raw_status,currency,client_order_id,external_order_id,filled_quantity,average_filled_price,filled_amount,commission,tax,ordered_at,filled_at,settlement_date'
 
 const isCancelReplaceExchange = (exchange) => ['COINONE', 'BINANCE'].includes(String(exchange || '').toUpperCase())
 
@@ -95,6 +106,7 @@ const mapProposalToTrade = (proposal) => {
 
   return {
     id: proposal.id,
+    sourceType: 'APP',
     rawStatus: proposal.status,
     brokerEnv: proposal.broker_env || 'REAL',
     orderOrgNo: proposal.external_order_org_no || '',
@@ -115,6 +127,56 @@ const mapProposalToTrade = (proposal) => {
     exchangeRate: '-',
     fees: '-',
     orderNumber: proposal.external_order_id || proposal.client_order_id || proposal.id,
+  }
+}
+
+const mapBrokerHistoryToTrade = (order, symbolNameMap = {}) => {
+  const orderedAt = order.ordered_at ? new Date(order.ordered_at) : null
+  const isValidDate = orderedAt && !Number.isNaN(orderedAt.getTime())
+  const date = isValidDate ? orderedAt.toISOString().slice(0, 10) : '-'
+  const time = isValidDate
+    ? orderedAt.toLocaleTimeString('ko-KR', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+    : '-'
+  const symbol = String(order.symbol || '-').trim().toUpperCase()
+  const displayName = symbolNameMap[symbol] || symbol || '-'
+  const currency = order.currency || (order.market_country === 'US' ? 'USD' : 'KRW')
+  const rawPrice = order.average_filled_price ?? order.price ?? null
+  const rawQuantity = order.filled_quantity ?? order.quantity ?? null
+  const computedAmount = order.filled_amount ?? order.order_amount ?? (
+    rawPrice !== null && rawQuantity !== null ? Number(rawPrice) * Number(rawQuantity) : null
+  )
+  const normalizedStatus = String(order.status || order.raw_status || '').toUpperCase()
+
+  return {
+    id: `broker-${order.id}`,
+    sourceType: 'BROKER',
+    rawStatus: normalizedStatus,
+    brokerEnv: order.broker_env || 'REAL',
+    orderOrgNo: '',
+    marketCountry: order.market_country || '',
+    rawPrice,
+    rawQuantity,
+    date,
+    time,
+    exchange: order.exchange || '-',
+    symbolName: displayName,
+    ticker: symbol,
+    side: mapTradeSide(order.side),
+    currency,
+    price: rawPrice === null ? '-' : formatCurrency(rawPrice, currency),
+    quantity: rawQuantity === null ? '-' : formatNumber(rawQuantity, { maximumFractionDigits: 8 }),
+    amount: computedAmount === null ? '-' : formatCurrency(computedAmount, currency),
+    status: mapTradeStatus(normalizedStatus),
+    exchangeRate: '-',
+    fees: (order.commission || order.tax)
+      ? formatCurrency((Number(order.commission || 0) + Number(order.tax || 0)), currency)
+      : '-',
+    orderNumber: order.external_order_id || order.client_order_id || order.id,
   }
 }
 
@@ -143,9 +205,23 @@ export default function TradeHistoryTab() {
     BINANCE: 'border-yellow-400/40 bg-yellow-400/15 text-yellow-300', 
   }
 
+  const mergeTrades = async (proposals = [], brokerOrders = []) => {
+    const hydratedRows = await hydrateTradeProposals(proposals)
+    const brokerSymbolMap = await fetchSymbolDisplayNames(brokerOrders)
+    return [
+      ...hydratedRows.map(mapProposalToTrade),
+      ...brokerOrders.map((order) => mapBrokerHistoryToTrade(order, brokerSymbolMap)),
+    ].sort((a, b) => {
+      const left = new Date(`${a.date}T${a.time === '-' ? '00:00:00' : a.time}`).getTime()
+      const right = new Date(`${b.date}T${b.time === '-' ? '00:00:00' : b.time}`).getTime()
+      return right - left
+    })
+  }
+
   useEffect(() => {
     let ignore = false
-    let channel = null
+    let proposalChannel = null
+    let brokerChannel = null
 
     const loadTradeHistory = async () => {
       setLoading(true)
@@ -161,19 +237,29 @@ export default function TradeHistoryTab() {
         return
       }
 
-      const { data, error } = await supabase
-        .from('trade_proposals')
-        .select(TRADE_HISTORY_SELECT_FIELDS)
-        .order('created_at', { ascending: false })
+      await syncTradeStatuses()
+
+      const [
+        { data: proposalRows, error: proposalError },
+        { data: brokerRows, error: brokerError },
+      ] = await Promise.all([
+        supabase
+          .from('trade_proposals')
+          .select(TRADE_HISTORY_SELECT_FIELDS)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('broker_order_history')
+          .select(BROKER_HISTORY_SELECT_FIELDS)
+          .order('ordered_at', { ascending: false }),
+      ])
 
       if (ignore) return
 
-      if (error) {
+      if (proposalError || (brokerError && !isMissingBrokerHistoryTableError(brokerError))) {
         setTradeHistory([])
         setTradeError('거래내역을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.')
       } else {
-        const hydratedRows = await hydrateTradeProposals(data || [])
-        setTradeHistory(hydratedRows.map(mapProposalToTrade))
+        setTradeHistory(await mergeTrades(proposalRows || [], brokerError ? [] : (brokerRows || [])))
       }
       setLoading(false)
     }
@@ -182,7 +268,7 @@ export default function TradeHistoryTab() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session?.user?.id || ignore) return
 
-      channel = supabase
+      proposalChannel = supabase
         .channel(`trade-history-${session.user.id}`)
         .on(
           'postgres_changes',
@@ -197,6 +283,22 @@ export default function TradeHistoryTab() {
           },
         )
         .subscribe()
+
+      brokerChannel = supabase
+        .channel(`broker-trade-history-${session.user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'broker_order_history',
+            filter: `user_id=eq.${session.user.id}`,
+          },
+          () => {
+            loadTradeHistory()
+          },
+        )
+        .subscribe()
     }
 
     loadTradeHistory()
@@ -204,8 +306,11 @@ export default function TradeHistoryTab() {
 
     return () => {
       ignore = true
-      if (channel) {
-        supabase.removeChannel(channel)
+      if (proposalChannel) {
+        supabase.removeChannel(proposalChannel)
+      }
+      if (brokerChannel) {
+        supabase.removeChannel(brokerChannel)
       }
     }
   }, [])
@@ -232,15 +337,41 @@ export default function TradeHistoryTab() {
     return `Bearer ${session.access_token}`
   }
 
-  const refreshTradeHistory = async () => {
-    const { data, error } = await supabase
-      .from('trade_proposals')
-      .select(TRADE_HISTORY_SELECT_FIELDS)
-      .order('created_at', { ascending: false })
+  const syncTradeStatuses = async () => {
+    try {
+      const authHeader = await getAuthHeader()
+      await fetch(`${API_BASE_URL}/api/trade/orders/sync-status`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: authHeader,
+        },
+      })
+    } catch {
+      // 상태 동기화 실패는 거래내역 조회 자체를 막지 않습니다.
+    }
+  }
 
-    if (error) throw error
-    const hydratedRows = await hydrateTradeProposals(data || [])
-    const nextTrades = hydratedRows.map(mapProposalToTrade)
+  const refreshTradeHistory = async () => {
+    await syncTradeStatuses()
+    const [
+      { data: proposalRows, error: proposalError },
+      { data: brokerRows, error: brokerError },
+    ] = await Promise.all([
+      supabase
+        .from('trade_proposals')
+        .select(TRADE_HISTORY_SELECT_FIELDS)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('broker_order_history')
+        .select(BROKER_HISTORY_SELECT_FIELDS)
+        .order('ordered_at', { ascending: false }),
+    ])
+
+    if (proposalError || (brokerError && !isMissingBrokerHistoryTableError(brokerError))) {
+      throw proposalError || brokerError
+    }
+    const nextTrades = await mergeTrades(proposalRows || [], brokerError ? [] : (brokerRows || []))
     setTradeHistory(nextTrades)
     if (selectedTrade) {
       const nextSelectedTrade = nextTrades.find((trade) => trade.id === selectedTrade.id)
@@ -263,6 +394,28 @@ export default function TradeHistoryTab() {
       throw new Error(payload.message || '주문 처리 요청에 실패했습니다.')
     }
     return payload
+  }
+
+  const handleSyncBrokerHistory = async () => {
+    setActionLoadingId('sync-broker-history')
+    setActionNotice('')
+    try {
+      const payload = await requestOrderAction('/api/trade/history/sync/toss', {
+        broker_env: 'REAL',
+        status_scope: 'ALL',
+      })
+      const syncedCount = payload?.data?.synced_count ?? 0
+      setActionNotice(`토스 주문 원장 동기화 완료: ${syncedCount}건 반영`)
+      await refreshTradeHistory()
+    } catch (error) {
+      if (isMissingBrokerHistoryTableError(error)) {
+        setActionNotice('브로커 주문 원장 테이블이 아직 배포되지 않았습니다. Supabase 마이그레이션 적용 후 다시 시도해 주세요.')
+      } else {
+        setActionNotice(error.message)
+      }
+    } finally {
+      setActionLoadingId('')
+    }
   }
 
   const handleOpenCancel = async (trade) => {
@@ -406,6 +559,14 @@ export default function TradeHistoryTab() {
           >
             More Filters
           </button>
+          <button
+            className="h-10 rounded border border-blue-500/40 bg-blue-500/10 px-4 text-sm font-bold text-blue-300 transition hover:bg-blue-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            disabled={Boolean(actionLoadingId)}
+            onClick={handleSyncBrokerHistory}
+          >
+            {actionLoadingId === 'sync-broker-history' ? '토스 동기화 중' : '토스 원장 동기화'}
+          </button>
         </div>
         {isMoreFiltersOpen ? (
           <div className="mt-3 flex justify-end border-t border-slate-800 pt-3">
@@ -497,7 +658,7 @@ export default function TradeHistoryTab() {
                       }`}>
                         {trade.status}{trade.status === '미체결' ? ' (Pending)' : ''}
                       </span>
-                      {trade.status === '미체결' ? (
+                      {trade.status === '미체결' && trade.sourceType === 'APP' ? (
                         <div className="flex flex-wrap gap-2">
                           <button
                             className="rounded border border-ai-cyan/40 px-2.5 py-1 text-xs font-bold text-ai-cyan transition hover:bg-ai-cyan/10 disabled:cursor-not-allowed disabled:opacity-50"
@@ -577,7 +738,7 @@ export default function TradeHistoryTab() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="font-bold text-white">지정가 {selectedTrade.side}</p>
+                    <p className="font-bold text-white">{selectedTrade.sourceType === 'BROKER' ? '브로커 원장' : '지정가'} {selectedTrade.side}</p>
                     <span className={`mt-2 inline-flex rounded-full px-3 py-1 text-xs font-bold ${selectedTrade.status === '체결완료' ? 'bg-emerald-400/15 text-emerald-300' : 'bg-slate-700 text-slate-200'
                       }`}>
                       {selectedTrade.status}
@@ -606,7 +767,7 @@ export default function TradeHistoryTab() {
                 <span className="font-mono text-2xl font-extrabold text-emerald-300">{selectedTrade.amount}</span>
               </div>
 
-              {selectedTrade.status === '미체결' ? (
+              {selectedTrade.status === '미체결' && selectedTrade.sourceType === 'APP' ? (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-2">
                     <button
@@ -693,6 +854,10 @@ export default function TradeHistoryTab() {
                 <div className="flex items-center justify-between">
                   <dt>거래소</dt>
                   <dd className="font-mono">{selectedTrade.exchange}</dd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <dt>원천</dt>
+                  <dd className="font-mono">{selectedTrade.sourceType === 'BROKER' ? 'BROKER_HISTORY' : 'TRADE_PROPOSAL'}</dd>
                 </div>
               </dl>
             </div>
