@@ -161,6 +161,8 @@ export default function TradeHistoryTab() {
         return
       }
 
+      await syncTradeStatuses()
+
       const { data, error } = await supabase
         .from('trade_proposals')
         .select(TRADE_HISTORY_SELECT_FIELDS)
@@ -232,7 +234,23 @@ export default function TradeHistoryTab() {
     return `Bearer ${session.access_token}`
   }
 
+  const syncTradeStatuses = async () => {
+    try {
+      const authHeader = await getAuthHeader()
+      await fetch(`${API_BASE_URL}/api/trade/orders/sync-status`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: authHeader,
+        },
+      })
+    } catch {
+      // 상태 동기화 실패는 거래내역 조회 자체를 막지 않습니다.
+    }
+  }
+
   const refreshTradeHistory = async () => {
+    await syncTradeStatuses()
     const { data, error } = await supabase
       .from('trade_proposals')
       .select(TRADE_HISTORY_SELECT_FIELDS)

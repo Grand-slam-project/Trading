@@ -337,3 +337,14 @@ teamproject/
 3. **ML 실험 격리**: `ml/` 디렉토리에서 주식/코인 모델의 학습 데이터, 피처 생성, 모델 학습을 격리하므로 Flask 서비스 코드와 실험 코드가 섞이지 않습니다.
 4. **협업 병목 제거**: 프론트엔드 개발자는 `frontend/` 내부 UI와 Supabase Realtime 구독에 집중하고, 백엔드 개발자는 `backend/` 내부에서 Toss API 스펙과 보안 정책에 맞춰 작업할 수 있습니다.
 5. **배포 편리성**: `Docker` 빌드 시 프론트엔드 도커파일과 백엔드 도커파일을 루트의 서브디렉토리 기준으로 각각 빌드하기 최적화된 구조입니다.
+
+---
+
+## 5. KIS order execution and estimated holdings additions
+
+* `backend/services/kis_client.py`
+  * `get_daily_order_executions()`: KIS domestic stock daily order/execution inquiry.
+  * `get_order_execution_status()`: Normalizes KIS order state into `EXECUTED`, `PARTIALLY_FILLED`, `CANCELED`, `ORDERED`, or `UNKNOWN`.
+* `backend/routes/trade.py`
+  * `POST /api/trade/orders/sync-status`: Syncs KIS DB order records with real KIS execution status, then falls back to balance checks.
+  * `POST /api/trade/estimated-holdings`: Builds DB-estimated holdings from executed `trade_proposals`, enriches stock positions with broker prices, and calculates valuation profit and profit rate.
