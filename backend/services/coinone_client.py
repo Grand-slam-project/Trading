@@ -156,12 +156,14 @@ class CoinoneClient:
                 continue
 
             if currency == "KRW":
-                available_cash = avail_val
+                available_cash = max(0.0, avail_val)
                 total_eval += balance_val
             else:
                 # 현재가 매핑 (없으면 0.0)
                 curr_price = tickers.get(currency, 0.0)
                 eval_price = curr_price * balance_val
+                cost_amount = avg_price_val * balance_val
+                profit = eval_price - cost_amount
                 total_eval += eval_price
                 
                 holdings.append({
@@ -170,9 +172,15 @@ class CoinoneClient:
                     "qty": balance_val,
                     "avg_price": avg_price_val,
                     "current_price": curr_price,
-                    "profit": (curr_price - avg_price_val) * balance_val if avg_price_val > 0 else 0.0,
+                    "cost_amount": cost_amount,
+                    "eval_amount": eval_price,
+                    "profit": profit,
                     "profit_rate": ((curr_price - avg_price_val) / avg_price_val) * 100.0 if avg_price_val > 0 else 0.0,
-                    "currency": "KRW"
+                    "currency": "KRW",
+                    "cost_amount_krw": cost_amount,
+                    "eval_amount_krw": eval_price,
+                    "profit_krw": profit,
+                    "source": "LIVE_BALANCE",
                 })
 
         return {

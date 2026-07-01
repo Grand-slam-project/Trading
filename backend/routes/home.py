@@ -14,6 +14,54 @@ home_bp = Blueprint("home", __name__)
 
 KIS_MARKET_MASTER_FILE_PATH = os.getenv("KIS_MARKET_MASTER_FILE_PATH", "")
 MARKET_SYNC_ADMIN_TOKEN = os.getenv("MARKET_SYNC_ADMIN_TOKEN", "")
+PORTFOLIO_EXCHANGES = {"KIS", "TOSS", "COINONE"}
+
+
+def _normalize_portfolio_exchange(value: str | None) -> str:
+    text = str(value or "").upper()
+    if "KIS" in text:
+        return "KIS"
+    if "TOSS" in text:
+        return "TOSS"
+    if "COINONE" in text:
+        return "COINONE"
+    if "BINANCE" in text:
+        return "BINANCE"
+    return text
+
+
+def _calculate_portfolio_summary(balance: dict, fallback_exchange: str) -> dict:
+    total_cost_amount = 0.0
+    total_evaluation = 0.0
+
+    for holding in balance.get("holdings", []) or []:
+        if str(holding.get("source") or "").upper() == "DB_ESTIMATED":
+            continue
+
+        holding_exchange = (
+            holding.get("raw_exchange")
+            or holding.get("exchange")
+            or holding.get("account_type")
+            or fallback_exchange
+        )
+        normalized_exchange = _normalize_portfolio_exchange(holding_exchange)
+        if normalized_exchange not in PORTFOLIO_EXCHANGES:
+            continue
+
+        total_cost_amount += to_float(holding.get("cost_amount_krw"))
+        total_evaluation += to_float(holding.get("eval_amount_krw"))
+
+    total_profit = total_evaluation - total_cost_amount
+    portfolio_profit_rate = (total_profit / total_cost_amount) * 100 if total_cost_amount > 0 else 0.0
+    return {
+        "total_cost_amount": total_cost_amount,
+        "total_evaluation_krw": total_evaluation,
+        "total_profit": total_profit,
+        "portfolio_profit_rate": portfolio_profit_rate,
+        "portfolio_calculation_exchanges": sorted(PORTFOLIO_EXCHANGES),
+        "portfolio_excluded_exchanges": ["BINANCE"],
+        "portfolio_excluded_sources": ["DB_ESTIMATED"],
+    }
 
 
 def require_market_sync_admin():
@@ -285,11 +333,12 @@ def get_dashboard_balance():
         else:
             return jsonify({"success": False, "message": f"지원하지 않는 거래소입니다: {exchange}"}), 400
 
-        exchange_rate = 1500.0
+        exchange_rate = to_float(balance.get("exchange_rate")) or 1500.0
         if exchange == "TOSS" and hasattr(client, "get_exchange_rate"):
-            exchange_rate = client.get_exchange_rate()
+            exchange_rate = exchange_rate or client.get_exchange_rate()
 
         balance["exchange_rate"] = exchange_rate
+        balance.update(_calculate_portfolio_summary(balance, exchange))
 
         return jsonify({
             "success": True,

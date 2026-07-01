@@ -230,30 +230,7 @@ const getHoldingEvaluationKrw = (holding = {}, exchangeRate = 1500) => {
 
 const getPortfolioProfitRate = (accountBalance) => {
   if (!accountBalance) return 0
-
-  const directRate = accountBalance.portfolio_profit_rate
-    ?? accountBalance.total_profit_rate
-    ?? accountBalance.profit_rate
-
-  if (directRate !== undefined && directRate !== null) {
-    return toNumber(directRate)
-  }
-
-  const holdings = Array.isArray(accountBalance.holdings) ? accountBalance.holdings : []
-  if (holdings.length === 0) return 0
-
-  const totalProfit = holdings.reduce((sum, item) => sum + toNumber(item.profit), 0)
-  const investedAmount = holdings.reduce((sum, item) => {
-    const qty = toNumber(item.qty)
-    const avgPrice = toNumber(item.avg_price)
-    const currentPrice = toNumber(item.current_price)
-    const profit = toNumber(item.profit)
-    const estimatedCost = avgPrice > 0 ? avgPrice * qty : Math.max(0, currentPrice * qty - profit)
-    return sum + estimatedCost
-  }, 0)
-
-  if (investedAmount <= 0) return 0
-  return (totalProfit / investedAmount) * 100
+  return toNumber(accountBalance.portfolio_profit_rate)
 }
 
 const mergeAccountBalances = (items, showMockAssets = true) => {
@@ -268,6 +245,8 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
   const cashUnavailableSources = []
   const cashBreakdown = {}
   const cashBreakdownEntries = []
+  let totalCostAmountKrw = 0
+  let portfolioEvaluationKrw = 0
   
   const holdings = filteredItems.flatMap((item) => {
     const exchange = item.exchange
@@ -282,6 +261,8 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
     }
     
     totalEvaluationKrw += itemEval
+    totalCostAmountKrw += toNumber(item.total_cost_amount)
+    portfolioEvaluationKrw += toNumber(item.total_evaluation_krw)
 
     if (item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '' && Number.isFinite(Number(item.available_cash))) {
       let itemCash = Number(item.available_cash)
@@ -306,11 +287,18 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
       exchange: holding.exchange || exchange,
       account_type: holding.account_type || exchange,
       env: item.env || 'REAL',
+      exchange_rate: item.exchange_rate || representativeRate,
     }))
   })
+  const totalProfitKrw = portfolioEvaluationKrw - totalCostAmountKrw
+  const portfolioProfitRate = totalCostAmountKrw > 0 ? (totalProfitKrw / totalCostAmountKrw) * 100 : 0
 
   return {
     total_evaluation: totalEvaluationKrw,
+    total_cost_amount: totalCostAmountKrw,
+    total_evaluation_krw: portfolioEvaluationKrw,
+    total_profit: totalProfitKrw,
+    portfolio_profit_rate: portfolioProfitRate,
     available_cash: hasCashValue ? availableCashKrw : null,
     currency: 'KRW', // 통합 잔고는 항상 KRW 기준
     exchange_rate: representativeRate,

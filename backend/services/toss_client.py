@@ -525,6 +525,7 @@ class TossClient(ExchangeClient):
         raw_items = result.get("items", []) if isinstance(result, dict) else []
         if not raw_items and isinstance(result, list):
             raw_items = result
+        exchange_rate = self.get_exchange_rate()
 
         for item in raw_items:
             symbol = item.get("symbol", "")
@@ -535,15 +536,23 @@ class TossClient(ExchangeClient):
                 avg_price = float(item.get("averagePurchasePrice", 0) or 0)
                 current_price = float(item.get("lastPrice", 0) or 0)
                 pl = item.get("profitLoss", {})
-                profit = float(pl.get("amount", 0) or 0)
                 profit_rate = float(pl.get("rate", 0) or 0) * 100.0
                 mv_item = item.get("marketValue", {})
                 eval_amount = float(mv_item.get("amount", 0) or 0)
             except (ValueError, TypeError):
-                qty = avg_price = current_price = profit = profit_rate = eval_amount = 0.0
+                qty = avg_price = current_price = profit_rate = eval_amount = 0.0
 
             if qty <= 0:
                 continue
+            cost_amount = avg_price * qty
+            if eval_amount <= 0:
+                eval_amount = current_price * qty
+            profit = eval_amount - cost_amount
+            currency_upper = str(currency or "USD").upper()
+            krw_rate = exchange_rate if currency_upper in ("USD", "USDT") else 1.0
+            cost_amount_krw = cost_amount * krw_rate
+            eval_amount_krw = eval_amount * krw_rate
+            profit_krw = eval_amount_krw - cost_amount_krw
 
             holdings_list.append({
                 "symbol": symbol,
@@ -551,10 +560,15 @@ class TossClient(ExchangeClient):
                 "qty": qty,
                 "avg_price": avg_price,
                 "current_price": current_price,
+                "cost_amount": cost_amount,
+                "eval_amount": eval_amount,
                 "profit": profit,
                 "profit_rate": profit_rate,
-                "eval_amount": eval_amount,
-                "currency": currency,
+                "currency": currency_upper,
+                "cost_amount_krw": cost_amount_krw,
+                "eval_amount_krw": eval_amount_krw,
+                "profit_krw": profit_krw,
+                "source": "LIVE_BALANCE",
             })
 
         # 총 평가금액이 0이면 items 합산으로 보정
@@ -573,14 +587,14 @@ class TossClient(ExchangeClient):
             ),
             (accounts or [None])[0],
         )
-        exchange_rate = self.get_exchange_rate()
         buying_power_components = []
         buying_power_errors = []
 
         for currency in ("KRW", "USD"):
             try:
                 buying_power_payload = self._get_buying_power_by_currency(currency)
-                if buying_power_payload["cash_buying_power"] is not None:
+                cash_buying_power = buying_power_payload["cash_buying_power"]
+                if cash_buying_power is not None and cash_buying_power > 0:
                     buying_power_components.append(buying_power_payload)
             except Exception as error:
                 buying_power_errors.append(f"{currency}:{error}")
@@ -597,7 +611,7 @@ class TossClient(ExchangeClient):
             available_cash_source = "buying-power"
         else:
             cash_info = self._extract_available_cash_info(result_payload=result, account_payload=selected_account)
-            available_cash = cash_info["value"]
+            available_cash = max(0.0, cash_info["value"]) if cash_info["value"] is not None else None
             available_cash_currency = cash_info["currency"] or ("USD" if usd_val > 0.0 else "KRW")
             available_cash_source = cash_info["source"]
 
@@ -613,6 +627,7 @@ class TossClient(ExchangeClient):
                 "errors": buying_power_errors,
             },
             "currency": "USD" if usd_val > 0.0 else "KRW",
+            "exchange_rate": exchange_rate,
             "holdings": holdings_list
         }
 
