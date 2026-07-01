@@ -61,6 +61,15 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
           val = balance.available_cash ?? null
           currency = 'USD'
         }
+      } else if (account.id === 'coin-wallet') {
+        const cryptoHoldings = (balance.holdings || []).filter(h => ['COINONE', 'BINANCE'].includes(String(h.exchange || '').toUpperCase()))
+        const cryptoEval = cryptoHoldings.reduce((sum, h) => sum + (parseNumeric(h.qty) * parseNumeric(h.current_price)), 0)
+        // available_cash_breakdown에서 KRW 또는 USDT 등 가상자산에 묶인 현금자산 추출
+        const krwCash = parseNumeric(balance.available_cash_breakdown?.KRW)
+        const usdtCash = parseNumeric(balance.available_cash_breakdown?.USDT)
+        const rate = Number(exchangeRate) || 1500
+        val = cryptoEval + krwCash + (usdtCash * rate)
+        currency = 'KRW'
       }
     }
 
