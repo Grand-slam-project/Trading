@@ -171,7 +171,8 @@ class CoinoneClient:
                     "avg_price": avg_price_val,
                     "current_price": curr_price,
                     "profit": (curr_price - avg_price_val) * balance_val if avg_price_val > 0 else 0.0,
-                    "profit_rate": ((curr_price - avg_price_val) / avg_price_val) * 100.0 if avg_price_val > 0 else 0.0
+                    "profit_rate": ((curr_price - avg_price_val) / avg_price_val) * 100.0 if avg_price_val > 0 else 0.0,
+                    "currency": "KRW"
                 })
 
         return {
