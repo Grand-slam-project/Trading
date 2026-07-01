@@ -10,4 +10,5 @@ indent_size = 4
 
 # 프론트엔드 관련 파일은 표준 2칸 들여쓰기 적용
 [*.{js,jsx,ts,tsx,css,json,html}]
+
 indent_size = 2

@@ -16,7 +16,6 @@ KIS_MARKET_MASTER_FILE_PATH = os.getenv("KIS_MARKET_MASTER_FILE_PATH", "")
 MARKET_SYNC_ADMIN_TOKEN = os.getenv("MARKET_SYNC_ADMIN_TOKEN", "")
 PORTFOLIO_EXCHANGES = {"KIS", "TOSS", "COINONE"}
 
-
 def _normalize_portfolio_exchange(value: str | None) -> str:
     text = str(value or "").upper()
     if "KIS" in text:
@@ -62,7 +61,6 @@ def _calculate_portfolio_summary(balance: dict, fallback_exchange: str) -> dict:
         "portfolio_excluded_exchanges": ["BINANCE"],
         "portfolio_excluded_sources": ["DB_ESTIMATED"],
     }
-
 
 def require_market_sync_admin():
     token = request.headers.get("X-Admin-Token", "")

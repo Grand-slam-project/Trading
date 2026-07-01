@@ -245,6 +245,7 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
   const cashUnavailableSources = []
   const cashBreakdown = {}
   const cashBreakdownEntries = []
+
   let totalCostAmountKrw = 0
   let portfolioEvaluationKrw = 0
   
@@ -261,6 +262,7 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
     }
     
     totalEvaluationKrw += itemEval
+
     totalCostAmountKrw += toNumber(item.total_cost_amount)
     portfolioEvaluationKrw += toNumber(item.total_evaluation_krw)
 
@@ -295,10 +297,12 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
 
   return {
     total_evaluation: totalEvaluationKrw,
+
     total_cost_amount: totalCostAmountKrw,
     total_evaluation_krw: portfolioEvaluationKrw,
     total_profit: totalProfitKrw,
     portfolio_profit_rate: portfolioProfitRate,
+
     available_cash: hasCashValue ? availableCashKrw : null,
     currency: 'KRW', // 통합 잔고는 항상 KRW 기준
     exchange_rate: representativeRate,

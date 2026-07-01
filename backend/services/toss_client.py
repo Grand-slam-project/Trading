@@ -587,12 +587,16 @@ class TossClient(ExchangeClient):
             ),
             (accounts or [None])[0],
         )
+
+        #exchange_rate = self.get_exchange_rate()
+
         buying_power_components = []
         buying_power_errors = []
 
         for currency in ("KRW", "USD"):
             try:
                 buying_power_payload = self._get_buying_power_by_currency(currency)
+
                 cash_buying_power = buying_power_payload["cash_buying_power"]
                 if cash_buying_power is not None and cash_buying_power > 0:
                     buying_power_components.append(buying_power_payload)
