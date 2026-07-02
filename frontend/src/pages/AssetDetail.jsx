@@ -2350,7 +2350,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                     </>
                   )}
                   {!orderPrecheck && precheckMessage && (
-                    <div className="rounded border border-amber-900/60 bg-amber-950/20 px-2 py-1 leading-relaxed text-amber-300">
+                    <div className="whitespace-pre-line rounded border border-amber-900/60 bg-amber-950/20 px-2 py-1 leading-relaxed text-amber-300">
                       {precheckMessage}
                     </div>
                   )}
@@ -2507,7 +2507,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   </p>
                 </div>
               ) : balanceMessage ? (
-                <div className="rounded border border-amber-900/50 bg-amber-950/20 px-3 py-3 text-[11px] leading-relaxed text-amber-300">
+                <div className="whitespace-pre-line rounded border border-amber-900/50 bg-amber-950/20 px-3 py-3 text-[11px] leading-relaxed text-amber-300">
                   {balanceMessage}
                 </div>
               ) : (
