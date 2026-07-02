@@ -28,14 +28,13 @@ def get_keys_status():
             "TOSS": {"registered": False, "accounts": []},
             "KIS": {"registered": False, "accounts": []},
             "COINONE": {"registered": False, "accounts": []},
-            "BINANCE": {"registered": False, "accounts": []}
+            "BINANCE": {"registered": False, "accounts": []},
+            "BINANCE_UM_FUTURES": {"registered": False, "accounts": []}
         }
         
         crypto_helper = current_app.crypto
         for record in records:
             ex = str(record.get("exchange") or "").upper()
-            if ex == "BINANCE_UM_FUTURES":
-                ex = "BINANCE"
             if ex not in result:
                 continue
                 
@@ -75,6 +74,12 @@ def get_keys_status():
 
             if "broker_env" not in result[ex]:
                 result[ex].update(account_status)
+
+            if ex == "BINANCE":
+                result["BINANCE_UM_FUTURES"]["registered"] = True
+                result["BINANCE_UM_FUTURES"]["accounts"].append(account_status)
+                if "broker_env" not in result["BINANCE_UM_FUTURES"]:
+                    result["BINANCE_UM_FUTURES"].update(account_status)
             
         return jsonify({"success": True, "data": result})
     except Exception as e:

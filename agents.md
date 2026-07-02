@@ -83,7 +83,7 @@
 AI 에이전트는 데이터 변경이나 조회 쿼리를 작성할 때 다음 핵심 테이블 구조를 준수해야 합니다. 자세한 명세는 [database_specification.md](database_specification.md)를 참고하십시오. UI/UX 구현 시 [design.md](design.md)에 기술된 스타일 규격을 준수해야 합니다.
 
 * `profiles`: 사용자 기본 정보 (Supabase Auth와 auth.uid() 연동)
-* `user_api_keys`: Toss/KIS/Coinone/Binance 인증 정보를 암호화 저장합니다. Toss는 `client_id`, `client_secret`, `accountSeq` 중심으로 관리합니다.
+* `user_api_keys`: Toss/KIS/Coinone/Binance 인증 정보를 암호화 저장합니다. Toss는 `client_id`, `client_secret`, `accountSeq` 중심으로 관리합니다. Binance는 현물과 USD-M 선물이 같은 API 키를 사용하므로 `exchange=BINANCE`, `broker_env=REAL/MOCK` 조합으로만 저장하고, `BINANCE_UM_FUTURES`는 주문/히스토리 도메인 식별자로만 사용합니다.
 * `paper_portfolios`: 페이퍼 트레이딩 및 시뮬레이션용 가상 잔고와 보유 종목을 저장합니다.
 
 * `trade_proposals`: 챗봇이 제안하고 사용자의 승인을 기다리는 주문 내역입니다.

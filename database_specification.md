@@ -44,7 +44,7 @@ erDiagram
 *   **주요 컬럼**:
     *   `id` (UUID, PK)
     *   `user_id` (UUID, FK) - `profiles.id` 참조
-    *   `exchange` (TEXT) - `TOSS`, `COINONE`, `BINANCE`, `KIS` 등 허용
+    *   `exchange` (TEXT) - `TOSS`, `COINONE`, `BINANCE`, `KIS` 등 허용. 바이낸스 현물/선물은 API 키 저장 관점에서는 동일한 `BINANCE` 키를 공유하며, `BINANCE_UM_FUTURES`는 주문/히스토리 도메인 식별자로만 사용합니다.
     *   `broker_env` (TEXT) - `MOCK`(모의투자), `REAL`(실거래)
     *   `encrypted_access_key` (TEXT) - 암호화된 API Key / Client ID
     *   `encrypted_secret_key` (TEXT) - 암호화된 Secret Key / Client Secret
@@ -55,6 +55,7 @@ erDiagram
     *   `created_at` (TIMESTAMPTZ)
 *   **제약조건**:
     *   `UNIQUE (user_id, exchange, broker_env)` 복합 유니크 키 적용
+    *   바이낸스는 `BINANCE + REAL`, `BINANCE + MOCK` 두 레코드로 관리하며, USD-M 선물 전용 별도 exchange 키(`BINANCE_UM_FUTURES`)를 저장하지 않습니다.
 *   **RLS**:
     *   `auth.uid() = user_id` 조건으로 본인의 API 키 레코드만 관리 가능.
 
@@ -63,7 +64,7 @@ erDiagram
 *   **주요 컬럼**:
     *   `id` (UUID, PK)
     *   `user_id` (UUID, FK) - `profiles.id` 참조
-    *   `exchange` (TEXT) - `TOSS`, `COINONE`, `BINANCE`, `KIS` 등
+    *   `exchange` (TEXT) - `TOSS`, `COINONE`, `BINANCE`, `BINANCE_UM_FUTURES`, `KIS` 등
     *   `asset_type` (TEXT) - `STOCK`(주식), `CRYPTO`(가상자산)
     *   `symbol` (TEXT) - 종목 코드 (예: 6자리 코드 또는 코인 식별명)
     *   `ticker` (TEXT) - KIS/Toss용 티커
@@ -87,6 +88,7 @@ erDiagram
 *   **현재 구현 메모**:
     *   `COINONE` 실주문은 백엔드 `trade` 라우트에서 지정가(`LIMIT`) 매수/매도와 미체결 주문 취소까지 연결되어 있습니다.
     *   `COINONE` 시장가(`MARKET`) 주문은 API 정책 검증 전까지 프론트엔드와 백엔드에서 차단합니다.
+    *   `BINANCE_UM_FUTURES`는 바이낸스 USD-M 선물 주문 도메인 식별자이며, 인증 정보는 `user_api_keys.exchange = BINANCE`의 동일한 REAL/MOCK 키를 조회해 사용합니다.
 
 ### 2.4 auto_trading_rules
 *   **용도**: 사용자가 자연어로 설정하거나 명시적으로 승인한 감시 조건식(익절 %, 손절 % 등)을 보관하는 테이블.
@@ -112,7 +114,7 @@ erDiagram
 *   **주요 컬럼**:
     *   `id` (UUID, PK)
     *   `user_id` (UUID, FK) - `profiles.id` 참조
-    *   `exchange` (TEXT) - `TOSS`, `KIS`, `COINONE`, `BINANCE`
+    *   `exchange` (TEXT) - `TOSS`, `KIS`, `COINONE`, `BINANCE`, `BINANCE_UM_FUTURES`
     *   `broker_env` (TEXT) - `MOCK`, `REAL`
     *   `account_ref` (TEXT) - 브로커 계좌 식별값
     *   `external_order_id` (TEXT) - 거래소 원주문번호
@@ -120,11 +122,11 @@ erDiagram
     *   `symbol` (TEXT) - 종목 코드/티커
     *   `market_country` (TEXT) - `KR` / `US`
     *   `side` (TEXT) - `BUY` / `SELL`
-    *   `order_type` (TEXT)
+    *   `order_type` (TEXT) - 거래소가 제공한 실제 주문 유형(`LIMIT`, `MARKET` 등). 현물/선물 시장 구분값을 저장하지 않으며, 바이낸스 체결 원문에 주문 유형이 없으면 `UNKNOWN`으로 기록합니다.
     *   `time_in_force` (TEXT)
     *   `status` (TEXT) - 내부 정규화 상태값 (`OPEN`, `PARTIALLY_FILLED`, `EXECUTED`, `CANCELED`, `FAILED` 등)
     *   `raw_status` (TEXT) - 거래소 원본 상태값
-    *   `currency` (TEXT) - `KRW` / `USD`
+    *   `currency` (TEXT) - `KRW` / `USD` / `USDT`
     *   `price` (NUMERIC)
     *   `quantity` (NUMERIC)
     *   `order_amount` (NUMERIC)
@@ -144,6 +146,7 @@ erDiagram
     *   `updated_at` (TIMESTAMPTZ)
 *   **제약조건**:
     *   `UNIQUE (user_id, exchange, broker_env, external_order_id)` 복합 유니크 키 적용
+    *   바이낸스 선물 체결은 `exchange = BINANCE_UM_FUTURES`로 저장해 현물(`BINANCE`)과 원장/필터/분석 범위를 분리합니다.
 *   **RLS & Realtime**:
     *   `auth.uid() = user_id` 조건으로 사용자별 원장만 조회/관리 가능
     *   Supabase Realtime publication에 포함되어 거래내역 탭에서 즉시 반영 가능

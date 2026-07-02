@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -11,6 +12,8 @@ from backend.services.toss_client import TossClient
 
 
 UTC = timezone.utc
+_binance_sync_lock = threading.Lock()
+_last_binance_sync_time = {}
 
 
 def _is_broker_order_history_missing_error(error) -> bool:
@@ -87,6 +90,25 @@ def _binance_symbol_assets(symbol: str) -> tuple[str, str]:
     return text, ""
 
 
+def _normalize_binance_trade_symbol(symbol: str) -> str:
+    """
+    잔고 API가 BTC와 BTCUSDT를 모두 줄 수 있어 거래내역 조회용 심볼을 안전하게 정규화합니다.
+    """
+    text = str(symbol or "").strip().upper().replace("_", "").replace("-", "").replace("/", "")
+    if not text:
+        return ""
+    _, quote_asset = _binance_symbol_assets(text)
+    return text if quote_asset else f"{text}USDT"
+
+
+def _normalize_binance_order_type(trade: dict) -> str:
+    """
+    바이낸스 체결 내역은 주문 유형을 주지 않는 경우가 있어 시장 구분값과 섞지 않고 별도 기본값으로 보존합니다.
+    """
+    raw_type = trade.get("type") or trade.get("orderType") or trade.get("origType")
+    return str(raw_type or "UNKNOWN").upper()
+
+
 def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade, exchange="BINANCE"):
     base_asset, quote_asset = _binance_symbol_assets(symbol)
     price = _to_float(trade.get("price")) or 0.0
@@ -108,10 +130,10 @@ def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade, exchan
         "quote_asset": quote_asset or None,
         "market_country": "US",
         "side": "BUY" if trade.get("isBuyer") or trade.get("buyer") else "SELL",
-        "order_type": "FUTURES" if exchange == "BINANCE_UM_FUTURES" else "SPOT",
+        "order_type": _normalize_binance_order_type(trade),
         "status": "EXECUTED",
         "raw_status": "FILLED",
-        "currency": "USDT" if quote_asset in {"USDT", "BUSD", "USDC"} else (quote_asset or "USDT"),
+        "currency": "USDT" if quote_asset == "USDT" else "USD",
         "price": price,
         "quantity": qty,
         "order_amount": quote_qty if quote_qty is not None else price * qty,
@@ -119,10 +141,10 @@ def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade, exchan
         "average_filled_price": price,
         "filled_amount": quote_qty if quote_qty is not None else price * qty,
         "commission": commission,
-        "commission_asset": trade.get("commissionAsset"),
+        "commission_asset": trade.get("commissionAsset") or None,
         "ordered_at": _normalize_timestamp((trade.get("time") or 0) / 1000 if trade.get("time") else None),
         "filled_at": _normalize_timestamp((trade.get("time") or 0) / 1000 if trade.get("time") else None),
-        "source_api": "binance_my_trades",
+        "source_api": "binance_futures_user_trades" if exchange == "BINANCE_UM_FUTURES" else "binance_my_trades",
         "raw_payload": trade,
         "last_synced_at": datetime.now(UTC).isoformat(),
     }
@@ -368,6 +390,21 @@ def sync_binance_broker_trades(auth_header, exchange="BINANCE", broker_env="REAL
     normalized_env = str(broker_env or "REAL").upper()
     target_exchange = "BINANCE" if exchange in ("BINANCE", "BINANCE_UM_FUTURES") else exchange
 
+    # Throttling 방어막: 동일 유저의 동일 환경/거래소 동기화 요청은 최소 5분 간격으로 제한
+    cache_key = (user_id, exchange, normalized_env)
+    now = datetime.now(UTC)
+    with _binance_sync_lock:
+        last_time = _last_binance_sync_time.get(cache_key)
+        if last_time and (now - last_time) < timedelta(minutes=5):
+            return {
+                "exchange": exchange,
+                "broker_env": normalized_env,
+                "symbols": symbols or [],
+                "synced_count": 0,
+                "results": [],
+                "message": "최근 5분 이내에 동기화가 수행되어 추가 조회를 스킵했습니다. (Throttled)"
+            }
+
     records = query_supabase(
         auth_header,
         "user_api_keys",
@@ -401,15 +438,15 @@ def sync_binance_broker_trades(auth_header, exchange="BINANCE", broker_env="REAL
 
     DEFAULT_MAJOR_SYMBOLS = {"BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT"}
     if symbols:
-        sync_symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+        sync_symbols = sorted({_normalize_binance_trade_symbol(symbol) for symbol in symbols if symbol})
     else:
         balance = client.get_balance()
         holding_symbols = {
-            f"{str(holding.get('symbol') or '').upper()}USDT"
+            _normalize_binance_trade_symbol(holding.get("symbol"))
             for holding in balance.get("holdings", []) or []
             if holding.get("symbol")
         }
-        sync_symbols = sorted(holding_symbols.union(DEFAULT_MAJOR_SYMBOLS))
+        sync_symbols = sorted({symbol for symbol in holding_symbols if symbol}.union(DEFAULT_MAJOR_SYMBOLS))
 
     synced_count = 0
     results = []
@@ -430,13 +467,17 @@ def sync_binance_broker_trades(auth_header, exchange="BINANCE", broker_env="REAL
         except Exception as error:
             results.append({"symbol": symbol, "fetched_count": 0, "error": str(error)[:300]})
 
-    return {
+    result = {
         "exchange": exchange,
         "broker_env": normalized_env,
         "symbols": sync_symbols,
         "synced_count": synced_count,
         "results": results,
     }
+    if any(result.get("error") is None for result in results):
+        with _binance_sync_lock:
+            _last_binance_sync_time[cache_key] = datetime.now(UTC)
+    return result
 
 
 def get_binance_cost_basis_from_history(auth_header, broker_env="REAL"):

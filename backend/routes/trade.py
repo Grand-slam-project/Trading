@@ -3024,6 +3024,34 @@ def sync_toss_trade_history():
         return jsonify({"success": False, "message": str(error)}), 400
 
 
+@trade_bp.route("/api/trade/history/sync/binance", methods=["POST"])
+def sync_binance_trade_history():
+    """
+    바이낸스 실제 주문/체결 내역을 broker_order_history 테이블로 동기화합니다.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return jsonify({"success": False, "message": "인증 토큰이 없습니다."}), 401
+
+    body = request.get_json(silent=True) or {}
+    exchange = body.get("exchange", "BINANCE")
+    broker_env = body.get("broker_env", "REAL")
+    
+    try:
+        from backend.services.broker_order_history_service import sync_binance_broker_trades
+        result = sync_binance_broker_trades(
+            auth_header=auth_header,
+            exchange=exchange,
+            broker_env=broker_env,
+            symbols=body.get("symbols"),
+            limit=body.get("limit", 1000),
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as error:
+        current_app.logger.exception("바이낸스 주문내역 동기화 실패")
+        return jsonify({"success": False, "message": str(error)}), 400
+
+
 @trade_bp.route("/api/trade/history/broker", methods=["GET"])
 def get_broker_trade_history():
     """
