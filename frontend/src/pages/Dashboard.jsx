@@ -783,8 +783,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       }
     })
 
-    const cashValue = Math.max(0, toNumber(balance.available_cash))
-    const allocationTotal = domesticValue + overseasValue + coinValue + cashValue
+    const cashValue = toNumber(balance.available_cash)
+    const allocationCashValue = cashValue > 0 ? cashValue : 0
+    const allocationTotal = domesticValue + overseasValue + coinValue + allocationCashValue
 
     if (allocationTotal <= 0) {
       return [
@@ -799,7 +800,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       { id: 'domestic', label: '국내 주식', amount: domesticValue, color: 'bg-blue-600' },
       { id: 'overseas', label: '해외 주식', amount: overseasValue, color: 'bg-ai-cyan' },
       { id: 'coin', label: '코인', amount: coinValue, color: 'bg-amber-400' },
-      { id: 'cash', label: '현금', amount: cashValue, color: 'bg-slate-500' }
+      { id: 'cash', label: '현금', amount: allocationCashValue, color: 'bg-slate-500' }
     ].map((item) => {
       const exactValue = (item.amount / allocationTotal) * 100
       return {

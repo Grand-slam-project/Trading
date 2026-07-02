@@ -6,6 +6,7 @@ from flask import current_app
 
 from backend.services.auth_service import get_user_id_from_header
 from backend.services.supabase_client import query_supabase, query_supabase_as_service_role
+from backend.services.binance_client import BinanceClient
 from backend.services.toss_client import TossClient
 
 
@@ -76,6 +77,55 @@ def _to_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _binance_symbol_assets(symbol: str) -> tuple[str, str]:
+    text = str(symbol or "").upper()
+    for quote in ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB", "USD"):
+        if text.endswith(quote) and len(text) > len(quote):
+            return text[:-len(quote)], quote
+    return text, ""
+
+
+def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade):
+    base_asset, quote_asset = _binance_symbol_assets(symbol)
+    price = _to_float(trade.get("price")) or 0.0
+    qty = _to_float(trade.get("qty")) or 0.0
+    quote_qty = _to_float(trade.get("quoteQty"))
+    commission = _to_float(trade.get("commission"))
+    trade_id = str(trade.get("id") or "")
+    order_id = str(trade.get("orderId") or "")
+    order_trade_id = f"{order_id}:{trade_id}" if order_id and trade_id else (trade_id or order_id)
+
+    return {
+        "user_id": user_id,
+        "exchange": "BINANCE",
+        "broker_env": str(broker_env or "REAL").upper(),
+        "external_order_id": order_trade_id,
+        "external_trade_id": trade_id or None,
+        "symbol": str(symbol or "").upper(),
+        "base_asset": base_asset or None,
+        "quote_asset": quote_asset or None,
+        "market_country": "US",
+        "side": "BUY" if trade.get("isBuyer") else "SELL",
+        "order_type": "SPOT",
+        "status": "EXECUTED",
+        "raw_status": "FILLED",
+        "currency": "USDT" if quote_asset in {"USDT", "BUSD", "USDC"} else (quote_asset or "USDT"),
+        "price": price,
+        "quantity": qty,
+        "order_amount": quote_qty if quote_qty is not None else price * qty,
+        "filled_quantity": qty,
+        "average_filled_price": price,
+        "filled_amount": quote_qty if quote_qty is not None else price * qty,
+        "commission": commission,
+        "commission_asset": trade.get("commissionAsset"),
+        "ordered_at": _normalize_timestamp((trade.get("time") or 0) / 1000 if trade.get("time") else None),
+        "filled_at": _normalize_timestamp((trade.get("time") or 0) / 1000 if trade.get("time") else None),
+        "source_api": "binance_my_trades",
+        "raw_payload": trade,
+        "last_synced_at": datetime.now(UTC).isoformat(),
+    }
 
 
 def _normalize_toss_order_status(order):
@@ -308,6 +358,143 @@ def sync_toss_broker_orders(
         "synced_count": synced_count,
         "results": results,
     }
+
+
+def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, limit=1000):
+    """
+    Fetch Binance personal spot trades and store them in broker_order_history.
+    """
+    user_id, _ = get_user_id_from_header(auth_header)
+    normalized_env = str(broker_env or "REAL").upper()
+
+    records = query_supabase(
+        auth_header,
+        "user_api_keys",
+        "GET",
+        params={
+            "user_id": f"eq.{user_id}",
+            "exchange": "eq.BINANCE",
+            "broker_env": f"eq.{normalized_env}",
+            "limit": "1",
+        },
+    )
+    if not records:
+        raise ValueError(f"등록된 BINANCE ({normalized_env}) API 키 정보가 없습니다.")
+
+    record = records[0]
+    crypto_helper = current_app.crypto
+    client = BinanceClient(
+        api_key=crypto_helper.decrypt(record.get("encrypted_access_key")),
+        secret_key=crypto_helper.decrypt(record.get("encrypted_secret_key")),
+    )
+
+    if symbols:
+        sync_symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+    else:
+        balance = client.get_balance()
+        sync_symbols = sorted({
+            f"{str(holding.get('symbol') or '').upper()}USDT"
+            for holding in balance.get("holdings", []) or []
+            if holding.get("symbol")
+        })
+
+    synced_count = 0
+    results = []
+    for symbol in sync_symbols:
+        if not symbol:
+            continue
+        try:
+            trades = client.list_my_trades(symbol, limit=limit)
+            rows = [
+                _map_binance_trade_to_history_row(user_id, normalized_env, symbol, trade)
+                for trade in trades
+                if trade.get("id") is not None
+            ]
+            if rows:
+                _upsert_broker_order_history(rows)
+                synced_count += len(rows)
+            results.append({"symbol": symbol, "fetched_count": len(rows), "error": None})
+        except Exception as error:
+            results.append({"symbol": symbol, "fetched_count": 0, "error": str(error)[:300]})
+
+    return {
+        "exchange": "BINANCE",
+        "broker_env": normalized_env,
+        "symbols": sync_symbols,
+        "synced_count": synced_count,
+        "results": results,
+    }
+
+
+def get_binance_cost_basis_from_history(auth_header, broker_env="REAL"):
+    """
+    Calculate remaining Binance spot cost basis from stored personal trades.
+    """
+    user_id, _ = get_user_id_from_header(auth_header)
+    normalized_env = str(broker_env or "REAL").upper()
+    rows = query_supabase_as_service_role(
+        "broker_order_history",
+        "GET",
+        params={
+            "user_id": f"eq.{user_id}",
+            "exchange": "eq.BINANCE",
+            "broker_env": f"eq.{normalized_env}",
+            "status": "eq.EXECUTED",
+            "order": "filled_at.asc.nullslast,ordered_at.asc.nullslast,created_at.asc",
+            "limit": "5000",
+        },
+    ) or []
+
+    positions = {}
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        base_asset = str(row.get("base_asset") or "").upper()
+        if not base_asset:
+            base_asset, _ = _binance_symbol_assets(symbol)
+        if not base_asset:
+            continue
+
+        side = str(row.get("side") or "").upper()
+        qty = _to_float(row.get("filled_quantity") or row.get("quantity")) or 0.0
+        amount = _to_float(row.get("filled_amount") or row.get("order_amount"))
+        price = _to_float(row.get("average_filled_price") or row.get("price")) or 0.0
+        if amount is None:
+            amount = price * qty
+        if qty <= 0 or amount < 0:
+            continue
+
+        state = positions.setdefault(base_asset, {"qty": 0.0, "cost": 0.0, "trades": 0})
+        commission = _to_float(row.get("commission")) or 0.0
+        commission_asset = str(row.get("commission_asset") or "").upper()
+        quote_asset = str(row.get("quote_asset") or row.get("currency") or "").upper()
+        quote_fee = commission if commission_asset and commission_asset == quote_asset else 0.0
+
+        if side == "SELL":
+            if state["qty"] > 0:
+                sell_qty = min(qty, state["qty"])
+                avg_cost = state["cost"] / state["qty"] if state["qty"] > 0 else 0.0
+                state["qty"] -= sell_qty
+                state["cost"] -= avg_cost * sell_qty
+        else:
+            state["qty"] += qty
+            state["cost"] += amount + quote_fee
+        state["trades"] += 1
+
+    result = {}
+    for asset, state in positions.items():
+        qty = state["qty"]
+        cost = state["cost"]
+        if qty <= 0.000001 or cost <= 0:
+            continue
+        result[asset] = {
+            "qty": qty,
+            "cost_amount": cost,
+            "avg_price": cost / qty,
+            "currency": "USDT",
+            "source": "BINANCE_SYNCED",
+            "trade_count": state["trades"],
+        }
+    return result
 
 
 def list_broker_order_history(auth_header, limit=300, exchange=None, broker_env=None):

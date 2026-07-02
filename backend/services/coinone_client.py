@@ -152,13 +152,13 @@ class CoinoneClient:
                 avail_val = 0.0
                 avg_price_val = 0.0
 
-            if balance_val <= 0:
-                continue
-
             if currency == "KRW":
-                available_cash = max(0.0, avail_val)
+                available_cash = avail_val
                 total_eval += balance_val
             else:
+                if balance_val <= 0:
+                    continue
+
                 # 현재가 매핑 (없으면 0.0)
                 curr_price = tickers.get(currency, 0.0)
                 eval_price = curr_price * balance_val

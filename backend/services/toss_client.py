@@ -594,7 +594,7 @@ class TossClient(ExchangeClient):
             try:
                 buying_power_payload = self._get_buying_power_by_currency(currency)
                 cash_buying_power = buying_power_payload["cash_buying_power"]
-                if cash_buying_power is not None and cash_buying_power > 0:
+                if cash_buying_power is not None:
                     buying_power_components.append(buying_power_payload)
             except Exception as error:
                 buying_power_errors.append(f"{currency}:{error}")
@@ -611,7 +611,7 @@ class TossClient(ExchangeClient):
             available_cash_source = "buying-power"
         else:
             cash_info = self._extract_available_cash_info(result_payload=result, account_payload=selected_account)
-            available_cash = max(0.0, cash_info["value"]) if cash_info["value"] is not None else None
+            available_cash = cash_info["value"] if cash_info["value"] is not None else None
             available_cash_currency = cash_info["currency"] or ("USD" if usd_val > 0.0 else "KRW")
             available_cash_source = cash_info["source"]
 

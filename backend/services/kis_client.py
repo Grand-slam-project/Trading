@@ -785,7 +785,7 @@ class KISClient(ExchangeClient):
             summary = output2[0]
             try:
                 total_eval = float(summary.get("tot_evlu_amt", 0))
-                available_cash = max(0.0, float(summary.get("dnca_tot_amt", 0)))
+                available_cash = float(summary.get("dnca_tot_amt", 0))
             except (ValueError, TypeError):
                 pass
                 
