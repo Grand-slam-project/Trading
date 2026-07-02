@@ -468,3 +468,11 @@ class BinanceFuturesClient:
             "status": data.get("status") or "CANCELED",
             "raw": data,
         }
+
+    def list_my_trades(self, symbol: str, limit: int = 1000, from_id: int | None = None) -> list[dict]:
+        normalized_symbol = _normalize_spot_symbol(symbol)
+        params = {"symbol": normalized_symbol, "limit": limit}
+        if from_id is not None:
+            params["fromId"] = from_id
+        data = self._signed_request("GET", "/fapi/v1/userTrades", params)
+        return data if isinstance(data, list) else []

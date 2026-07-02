@@ -203,6 +203,7 @@ export default function TradeHistoryTab() {
     KIS: 'border-rose-500/40 bg-rose-500/15 text-rose-300',
     COINONE: 'border-sky-500/40 bg-sky-500/15 text-sky-300',
     BINANCE: 'border-yellow-400/40 bg-yellow-400/15 text-yellow-300', 
+    BINANCE_UM_FUTURES: 'border-amber-500/40 bg-amber-500/15 text-amber-300',
   }
 
   const mergeTrades = async (proposals = [], brokerOrders = []) => {
@@ -545,7 +546,7 @@ export default function TradeHistoryTab() {
             </div>
             <div className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
               <span>Exchange:</span>
-              {['ALL', 'TOSS', 'KIS', 'COINONE', 'BINANCE'].map((item) => (
+              {['ALL', 'TOSS', 'KIS', 'COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].map((item) => (
                 <button
                   key={item}
                   className={`rounded px-3 py-2 text-xs font-bold transition ${selectedExchange === item
@@ -555,7 +556,7 @@ export default function TradeHistoryTab() {
                   type="button"
                   onClick={() => setSelectedExchange(item)}
                 >
-                  {item}
+                  {item === 'BINANCE_UM_FUTURES' ? 'BINANCE(선물)' : item}
                 </button>
               ))}
             </div>

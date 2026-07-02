@@ -405,11 +405,11 @@ def get_dashboard_balance():
             exchange_rate = exchange_rate or client.get_exchange_rate()
 
         balance["exchange_rate"] = exchange_rate
-        if exchange == "BINANCE":
+        if exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
             sync_result = None
             sync_error = None
             try:
-                sync_result = sync_binance_broker_trades(auth_header, broker_env=broker_env)
+                sync_result = sync_binance_broker_trades(auth_header, exchange=exchange, broker_env=broker_env)
             except Exception as error:
                 sync_error = str(error)[:300]
             try:
