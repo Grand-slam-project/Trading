@@ -389,15 +389,17 @@ def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, lim
         env=normalized_env,
     )
 
+    DEFAULT_MAJOR_SYMBOLS = {"BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT"}
     if symbols:
         sync_symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
     else:
         balance = client.get_balance()
-        sync_symbols = sorted({
+        holding_symbols = {
             f"{str(holding.get('symbol') or '').upper()}USDT"
             for holding in balance.get("holdings", []) or []
             if holding.get("symbol")
-        })
+        }
+        sync_symbols = sorted(holding_symbols.union(DEFAULT_MAJOR_SYMBOLS))
 
     synced_count = 0
     results = []
