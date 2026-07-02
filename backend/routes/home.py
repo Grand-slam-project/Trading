@@ -51,7 +51,7 @@ def _calculate_portfolio_summary(balance: dict, fallback_exchange: str) -> dict:
 
         cost_amount = to_float(holding.get("cost_amount_krw"))
         eval_amount = to_float(holding.get("eval_amount_krw"))
-        if normalized_exchange == "BINANCE" and cost_amount <= 0:
+        if normalized_exchange == "BINANCE" and cost_amount <= 0 and eval_amount <= 0:
             continue
         if cost_amount <= 0 and eval_amount <= 0:
             continue
@@ -87,8 +87,10 @@ def _enrich_binance_balance_with_cost_basis(balance: dict, cost_basis: dict, exc
         symbol = str(holding.get("symbol") or "").upper()
         basis = cost_basis.get(symbol)
         if not basis:
+            eval_val = to_float(holding.get("eval_amount"))
             holdings.append({
                 **holding,
+                "eval_amount_krw": eval_val * exchange_rate,
                 "cost_basis_status": "MISSING_TRADE_HISTORY",
             })
             continue

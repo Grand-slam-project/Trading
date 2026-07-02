@@ -8,6 +8,20 @@ import { formatNewsDate, getWatchlistNewsMarket, mergeLatestNews } from '../dash
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050'
 
+const RefreshIcon = ({ className = '' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    className={className}
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+  </svg>
+)
+
 const STOCK_INTERVALS = [
   { label: '1분', value: '1m' },
   { label: '5분', value: '5m' },
@@ -86,14 +100,16 @@ async function getAuthHeader() {
   return session?.access_token ? `Bearer ${session.access_token}` : null
 }
 
-function getChartConfig(item, assetType) {
+function getChartConfig(item, assetType, keyStatus = {}) {
   const sourcePayload = item?.sourcePayload || {}
   const exchange = String(item?.exchange || item?.account || sourcePayload.exchange || (assetType === 'CRYPTO' ? 'COINONE' : 'TOSS')).toUpperCase()
-  const brokerEnv = String(sourcePayload.broker_env || sourcePayload.env || (exchange === 'KIS' ? 'REAL' : 'REAL')).toUpperCase()
+  const statusExchange = exchange === 'BINANCE_UM_FUTURES' ? 'BINANCE' : exchange
+  const registeredEnv = keyStatus[statusExchange]?.broker_env || keyStatus[statusExchange]?.accounts?.[0]?.broker_env
+  const brokerEnv = String(registeredEnv || sourcePayload.broker_env || sourcePayload.env || (exchange === 'KIS' ? 'REAL' : 'REAL')).toUpperCase()
   return { exchange, brokerEnv }
 }
 
-function WatchlistCandlestickChart({ item, assetType, onLatestPriceChange }) {
+function WatchlistCandlestickChart({ item, assetType, keyStatus, onLatestPriceChange }) {
   const defaultInterval = assetType === 'CRYPTO' ? '1h' : '1d'
   const [chartInterval, setChartInterval] = useState(defaultInterval)
   const [candleData, setCandleData] = useState([])
@@ -192,7 +208,7 @@ function WatchlistCandlestickChart({ item, assetType, onLatestPriceChange }) {
       setChartError('')
 
       try {
-        const { exchange, brokerEnv } = getChartConfig(item, assetType)
+        const { exchange, brokerEnv } = getChartConfig(item, assetType, keyStatus)
         const authHeader = await getAuthHeader()
         const params = new URLSearchParams({
           exchange,
@@ -270,7 +286,7 @@ function WatchlistCandlestickChart({ item, assetType, onLatestPriceChange }) {
       isMounted = false
       if (abortControllerRef.current) abortControllerRef.current.abort()
     }
-  }, [item?.id, item?.exchange, item?.account, assetType, chartInterval, onLatestPriceChange])
+  }, [item?.id, item?.exchange, item?.account, assetType, chartInterval, onLatestPriceChange, keyStatus])
 
   useEffect(() => {
     if (!chartRef.current || !candleSeriesRef.current) return
@@ -351,6 +367,7 @@ export default function WatchlistTab({ displayCurrency = 'KRW', exchangeRate = 1
   const [watchlistItems, setWatchlistItems] = useState([])
   const [watchlistLoading, setWatchlistLoading] = useState(false)
   const [watchlistError, setWatchlistError] = useState('')
+  const [keyStatus, setKeyStatus] = useState({})
   const [newsItems, setNewsItems] = useState([])
   const [newsLoading, setNewsLoading] = useState(false)
   const [newsError, setNewsError] = useState('')
@@ -420,32 +437,40 @@ export default function WatchlistTab({ displayCurrency = 'KRW', exchangeRate = 1
     setSelectedId(sourceId)
   }
 
-  useEffect(() => {
-    let isMounted = true
-
-    async function loadWatchlist() {
-      setWatchlistLoading(true)
-      setWatchlistError('')
-      try {
-        const items = await fetchUserWatchlist()
-        if (!isMounted) return
-        setWatchlistItems(items)
-        setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items[0]?.id || '')
-      } catch (error) {
-        if (!isMounted) return
-        setWatchlistItems([])
-        setSelectedId('')
-        setWatchlistError(error.message || '관심종목을 불러오지 못했습니다.')
-      } finally {
-        if (isMounted) setWatchlistLoading(false)
+  const fetchKeyStatus = async () => {
+    try {
+      const authHeader = await getAuthHeader()
+      const response = await fetch(`${API_BASE_URL}/api/keys/status`, {
+        headers: authHeader ? { Authorization: authHeader } : {},
+      })
+      const payload = await response.json()
+      if (payload.success) {
+        setKeyStatus(payload.data || {})
       }
+    } catch (e) {
+      console.error("API Key 상태 로드 실패:", e)
     }
+  }
 
-    loadWatchlist()
-
-    return () => {
-      isMounted = false
+  const loadWatchlist = async () => {
+    setWatchlistLoading(true)
+    setWatchlistError('')
+    try {
+      const items = await fetchUserWatchlist()
+      setWatchlistItems(items)
+      setSelectedId((current) => current && items.some((item) => item.id === current) ? current : items[0]?.id || '')
+    } catch (error) {
+      setWatchlistItems([])
+      setSelectedId('')
+      setWatchlistError(error.message || '관심종목을 불러오지 못했습니다.')
+    } finally {
+      setWatchlistLoading(false)
     }
+  }
+
+  useEffect(() => {
+    void loadWatchlist()
+    void fetchKeyStatus()
   }, [])
 
   useEffect(() => {
@@ -546,7 +571,20 @@ export default function WatchlistTab({ displayCurrency = 'KRW', exchangeRate = 1
       <section className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
         <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <SectionHeader title="관심종목 명단" />
-          <div className="inline-flex w-fit rounded-md border border-slate-700/80 bg-[#0f172a] p-1">
+          <div className="flex shrink-0 gap-2 items-center">
+            <button
+              className="inline-flex items-center gap-1 rounded border border-slate-700 px-2.5 py-1 text-xs font-bold text-slate-400 transition-all hover:border-ai-cyan hover:text-white disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+              type="button"
+              disabled={watchlistLoading}
+              onClick={async () => {
+                await loadWatchlist()
+                await fetchKeyStatus()
+              }}
+            >
+              <RefreshIcon className={`h-3.5 w-3.5 ${watchlistLoading ? 'animate-spin' : ''}`} />
+              {watchlistLoading ? '갱신 중' : '새로 고침'}
+            </button>
+            <div className="inline-flex w-fit rounded-md border border-slate-700/80 bg-[#0f172a] p-1">
             {WATCHLIST_MARKET_FILTERS.map((filter) => (
               <button
                 key={filter.key}
@@ -561,6 +599,7 @@ export default function WatchlistTab({ displayCurrency = 'KRW', exchangeRate = 1
                 {filter.label}
               </button>
             ))}
+          </div>
           </div>
         </div>
         <div className={useSlider ? 'flex snap-x gap-2 overflow-x-auto pb-2' : 'grid gap-2 md:grid-cols-2 xl:grid-cols-4'}>
@@ -640,6 +679,7 @@ export default function WatchlistTab({ displayCurrency = 'KRW', exchangeRate = 1
           <WatchlistCandlestickChart
             item={selectedItem}
             assetType={assetType}
+            keyStatus={keyStatus}
             onLatestPriceChange={setChartCurrentPrice}
           />
         ) : (
