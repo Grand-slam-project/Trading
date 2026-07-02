@@ -386,6 +386,7 @@ def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, lim
     client = BinanceClient(
         api_key=crypto_helper.decrypt(record.get("encrypted_access_key")),
         secret_key=crypto_helper.decrypt(record.get("encrypted_secret_key")),
+        env=normalized_env,
     )
 
     if symbols:
