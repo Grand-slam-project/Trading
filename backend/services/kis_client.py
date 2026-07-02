@@ -6,10 +6,12 @@ import logging
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from backend.services.exchange_client import ExchangeClient
 
 KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
+MARKET_INDEX_DEBUG = os.getenv("MARKET_INDEX_DEBUG", "false").lower() == "true"
 
 # KIS 모의투자 API Rate Limiter
 _kis_mock_rate_limiter_lock = threading.Lock()
@@ -751,13 +753,14 @@ class KISClient(ExchangeClient):
             try:
                 avg_price = float(stock.get("pchs_avg_pric", 0))
                 current_price = float(stock.get("prpr", 0))
-                profit = float(stock.get("evlu_pfls_amt", 0))
                 profit_rate = float(stock.get("evlu_pfls_rt", 0))
             except (ValueError, TypeError):
                 avg_price = 0.0
                 current_price = 0.0
-                profit = 0.0
                 profit_rate = 0.0
+            cost_amount = avg_price * qty
+            eval_amount = current_price * qty
+            profit = eval_amount - cost_amount
             
             holdings.append({
                 "symbol": symbol,
@@ -765,8 +768,15 @@ class KISClient(ExchangeClient):
                 "qty": qty,
                 "avg_price": avg_price,
                 "current_price": current_price,
+                "cost_amount": cost_amount,
+                "eval_amount": eval_amount,
                 "profit": profit,
-                "profit_rate": profit_rate
+                "profit_rate": profit_rate,
+                "currency": "KRW",
+                "cost_amount_krw": cost_amount,
+                "eval_amount_krw": eval_amount,
+                "profit_krw": profit,
+                "source": "LIVE_BALANCE",
             })
             
         total_eval = 0.0

@@ -1,5 +1,4 @@
 import re
-import os
 import time
 import threading
 import requests
@@ -14,8 +13,6 @@ from backend.services.broker_order_history_service import (
 from backend.services.toss_client import TossClient
 from backend.services.kis_client import KISClient
 from backend.services.coinone_client import CoinoneClient
-from backend.services.binance_client import BinanceClient, BinanceFuturesClient
-from backend.services.error_message_service import format_error_payload
 
 # 단기 인메모리 시세 캐시 정의 (Rate limit 방지용)
 CANDLE_CACHE = {}
@@ -26,8 +23,6 @@ PRICE_CHANGE_CACHE_TTL = 10
 CACHE_TTL_SECONDS = 10  # 기본값 10초 유효
 LEVEL2_CACHE_TTL_SECONDS = 10
 REAL_ORDER_LIMIT_KRW = 100000.0
-SUPPORTED_TRADE_EXCHANGES = {"TOSS", "KIS", "COINONE", "BINANCE", "BINANCE_UM_FUTURES"}
-CRYPTO_EXCHANGES = {"COINONE", "BINANCE", "BINANCE_UM_FUTURES"}
 
 def determine_market_country(symbol: str) -> str:
     """
@@ -126,7 +121,7 @@ def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
                     yesterday_last = float(ticker.get("yesterday_last", last))
                     if yesterday_last > 0:
                         change_rate = ((last - yesterday_last) / yesterday_last) * 100
-        elif exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
+        elif exchange == "BINANCE":
             url = "https://api.binance.com/api/v3/ticker/24hr"
             res = requests.get(url, params={"symbol": symbol.upper()}, timeout=3)
             if res.status_code == 200:
@@ -174,7 +169,7 @@ def get_dynamic_ttl(exchange: str, symbol: str, interval: str) -> int:
     """
     exchange_upper = exchange.upper()
     
-    if exchange_upper in ("COINONE", "BINANCE", "BINANCE_UM_FUTURES"):
+    if exchange_upper in ("COINONE", "BINANCE"):
         is_market_open = True  # 가상자산은 24시간 가동
     else:
         # 주식인 경우 숫자 심볼이면 한국 주식, 영문자가 섞여 있으면 미국 주식으로 판별
@@ -221,15 +216,14 @@ def _load_user_exchange_record(auth_header: str, user_id: str, exchange: str, br
     사용자 거래소 크리덴셜을 로드하고 복호화합니다.
     """
     crypto_helper = current_app.crypto
-    credential_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
     params = {
         "user_id": f"eq.{user_id}",
-        "exchange": f"eq.{credential_exchange}",
+        "exchange": f"eq.{exchange}",
         "broker_env": f"eq.{broker_env}"
     }
     records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
     if not records:
-        raise ValueError(f"등록된 {credential_exchange} ({broker_env}) API 크리덴셜 정보가 없습니다.")
+        raise ValueError(f"등록된 {exchange} ({broker_env}) API 크리덴셜 정보가 없습니다.")
 
     record = records[0]
     access_key = crypto_helper.decrypt(record.get("encrypted_access_key"))
@@ -318,18 +312,6 @@ def _build_exchange_client(exchange: str, broker_env: str, record: dict, access_
             access_token=access_key,
             secret_key=secret_key,
         )
-    if exchange == "BINANCE":
-        return BinanceClient(
-            api_key=access_key,
-            secret_key=secret_key,
-            env=broker_env,
-        )
-    if exchange == "BINANCE_UM_FUTURES":
-        return BinanceFuturesClient(
-            api_key=access_key,
-            secret_key=secret_key,
-            env=broker_env,
-        )
     return None
 
 
@@ -407,78 +389,6 @@ def _infer_trade_status_from_order_status(order_status: dict | None, fallback: s
     if normalized in {"REJECTED", "FAILED", "EXPIRED"}:
         return "FAILED"
     return fallback
-
-
-def _as_float(value, default: float = 0.0) -> float:
-    try:
-        if value in (None, ""):
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _pick_nested_value(data: dict | None, keys: tuple[str, ...]):
-    if not isinstance(data, dict):
-        return None
-    for key in keys:
-        if key in data and data.get(key) not in (None, ""):
-            return data.get(key)
-    for value in data.values():
-        if isinstance(value, dict):
-            nested = _pick_nested_value(value, keys)
-            if nested not in (None, ""):
-                return nested
-    return None
-
-
-def _normalize_coinone_synced_status(order_status: dict | None, requested_qty: float = 0.0) -> tuple[str, dict]:
-    raw = (order_status or {}).get("raw") if isinstance(order_status, dict) else {}
-    if not isinstance(raw, dict):
-        raw = {}
-
-    raw_status = (
-        (order_status or {}).get("status")
-        or _pick_nested_value(raw, ("status", "order_status", "state", "orderState"))
-        or ""
-    )
-    normalized = str(raw_status).upper()
-    filled_qty = _as_float(_pick_nested_value(raw, (
-        "filled_qty",
-        "filled_quantity",
-        "executed_qty",
-        "executed_quantity",
-        "executed_volume",
-        "filledAmount",
-    )))
-    remaining_qty = _as_float(_pick_nested_value(raw, (
-        "remaining_qty",
-        "remain_qty",
-        "remaining_quantity",
-        "left_qty",
-        "unfilled_qty",
-    )), default=-1.0)
-    requested_qty = _as_float(requested_qty)
-
-    detail = {
-        "raw_status": raw_status,
-        "filled_qty": filled_qty,
-        "remaining_qty": remaining_qty,
-    }
-
-    if normalized in {"CANCELED", "CANCELLED", "CANCEL", "CANCEL_DONE"}:
-        return "CANCELED", detail
-    if normalized in {"REJECTED", "FAILED", "FAIL", "ERROR", "EXPIRED", "EXPIRE"}:
-        return "FAILED", detail
-    if normalized in {"EXECUTED", "FILLED", "COMPLETED", "COMPLETE", "DONE"}:
-        return "EXECUTED", detail
-    if requested_qty > 0 and filled_qty >= requested_qty:
-        return "EXECUTED", detail
-    if filled_qty > 0 and remaining_qty == 0:
-        return "EXECUTED", detail
-    if normalized in {"ORDERED", "RECEIVED", "ACCEPTED"}:
-        return "APPROVED", detail
-    return "PENDING", detail
 
 
 def _patch_proposal_as_not_actionable(auth_header: str, proposal_id: str, order_status: dict | None, reason: str):
@@ -840,7 +750,7 @@ def _resolve_reference_price(exchange: str, symbol: str, order_type: str, price,
             raise ValueError("주문 단가는 0보다 커야 합니다.")
         return resolved_price, "LIMIT_INPUT"
 
-    if exchange not in ("TOSS", "KIS", "COINONE", "BINANCE", "BINANCE_UM_FUTURES") or client is None:
+    if exchange not in ("TOSS", "KIS", "COINONE") or client is None:
         raise ValueError(f"{exchange} 거래소는 현재 시장가 조회가 지원되지 않습니다.")
 
     price_info = client.get_price(symbol)
@@ -898,39 +808,6 @@ def _extract_balance_snapshot(client, symbol: str) -> dict:
     }
 
 
-def _normalize_futures_order_options(position_side=None, reduce_only=False, leverage=None, margin_type=None) -> dict:
-    """
-    바이낸스 USD-M 선물 주문 옵션을 검증하고 표준화합니다.
-    """
-    normalized_position_side = str(position_side or "BOTH").upper()
-    if normalized_position_side not in ("BOTH", "LONG", "SHORT"):
-        raise ValueError("선물 포지션 방향은 BOTH, LONG, SHORT 중 하나여야 합니다.")
-
-    normalized_margin_type = str(margin_type or "CROSSED").upper()
-    if normalized_margin_type == "CROSS":
-        normalized_margin_type = "CROSSED"
-    if normalized_margin_type not in ("CROSSED", "ISOLATED"):
-        raise ValueError("선물 마진 모드는 교차(CROSSED) 또는 격리(ISOLATED)만 지원합니다.")
-
-    try:
-        leverage_int = int(leverage or 1)
-    except (TypeError, ValueError):
-        raise ValueError("선물 레버리지는 1~125 사이 정수로 입력해 주세요.")
-    if leverage_int < 1 or leverage_int > 125:
-        raise ValueError("선물 레버리지는 1~125 사이로 입력해 주세요.")
-
-    reduce_only_bool = bool(reduce_only)
-    if reduce_only_bool and normalized_position_side in ("LONG", "SHORT"):
-        raise ValueError("바이낸스 헤지 모드(LONG/SHORT) 주문에는 Reduce Only 값을 함께 보낼 수 없습니다.")
-
-    return {
-        "position_side": normalized_position_side,
-        "reduce_only": reduce_only_bool,
-        "leverage": leverage_int,
-        "margin_type": normalized_margin_type,
-    }
-
-
 def _build_precheck_payload(
     exchange: str,
     symbol: str,
@@ -942,7 +819,6 @@ def _build_precheck_payload(
     record: dict,
     access_key: str,
     secret_key: str,
-    futures_options: dict | None = None,
 ) -> dict:
     """
     주문 전 검증 결과를 공통 포맷으로 생성합니다.
@@ -956,70 +832,33 @@ def _build_precheck_payload(
 
     client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
     reference_price, price_source = _resolve_reference_price(exchange, symbol, order_type, price, client)
-    normalized_futures_options = None
-    if exchange == "BINANCE_UM_FUTURES":
-        normalized_futures_options = _normalize_futures_order_options(**(futures_options or {}))
-        position_mode = client.get_position_mode()
-        normalized_futures_options["position_mode"] = position_mode.get("mode")
-        if normalized_futures_options["position_side"] in ("LONG", "SHORT") and not position_mode.get("is_hedge_mode"):
-            raise ValueError("현재 바이낸스 선물 계정은 One-way 모드입니다. LONG/SHORT를 쓰려면 Binance Futures에서 Hedge Mode를 켜거나, 앱에서는 BOTH를 선택해 주문하세요.")
-        max_leverage = client.get_max_leverage(symbol)
-        normalized_futures_options["max_leverage"] = max_leverage
-        if max_leverage and normalized_futures_options["leverage"] > max_leverage:
-            raise ValueError(f"{symbol} 바이낸스 선물에서 현재 허용되는 최대 레버리지는 {max_leverage}x입니다. 레버리지를 {max_leverage}x 이하로 낮춰 다시 시도하세요.")
     estimated_amount = reference_price * qty
-    required_margin = (
-        estimated_amount / normalized_futures_options["leverage"]
-        if normalized_futures_options
-        else estimated_amount
-    )
-    estimated_amount_krw = estimated_amount * 1400.0 if exchange in ("BINANCE", "BINANCE_UM_FUTURES") else estimated_amount
+    estimated_amount_krw = estimated_amount * 1400.0 if exchange == "BINANCE" else estimated_amount
     balance_snapshot = _extract_balance_snapshot(client, symbol)
     available_cash = balance_snapshot["available_cash"]
     holding_qty = balance_snapshot["holding_qty"]
 
     exceeds_hard_cap = broker_env == "REAL" and estimated_amount_krw > REAL_ORDER_LIMIT_KRW
-    if exchange == "BINANCE_UM_FUTURES":
-        insufficient_cash = (
-            broker_env == "REAL"
-            and not normalized_futures_options["reduce_only"]
-            and available_cash is not None
-            and required_margin > available_cash
-        )
-        insufficient_holding = (
-            broker_env == "REAL"
-            and normalized_futures_options["reduce_only"]
-            and holding_qty is not None
-            and qty > abs(holding_qty)
-        )
-    else:
-        insufficient_cash = (
-            action.upper() == "BUY"
-            and broker_env == "REAL"
-            and available_cash is not None
-            and required_margin > available_cash
-        )
-        insufficient_holding = (
-            action.upper() == "SELL"
-            and broker_env == "REAL"
-            and holding_qty is not None
-            and qty > holding_qty
-        )
+    insufficient_cash = (
+        action.upper() == "BUY"
+        and broker_env == "REAL"
+        and available_cash is not None
+        and estimated_amount > available_cash
+    )
+    insufficient_holding = (
+        action.upper() == "SELL"
+        and broker_env == "REAL"
+        and holding_qty is not None
+        and qty > holding_qty
+    )
 
     asset_type = "STOCK" if exchange in ("TOSS", "KIS") else "CRYPTO"
     currency = "KRW" if exchange in ("TOSS", "KIS", "COINONE") else "USD"
     warnings = []
-    futures_real_blocked = (
-        exchange == "BINANCE_UM_FUTURES"
-        and broker_env == "REAL"
-        and os.getenv("BINANCE_FUTURES_REAL_ENABLED", "false").lower() != "true"
-    )
-    if futures_real_blocked:
-        warnings.append("바이낸스 선물 실거래는 기본 차단되어 있습니다. 모의투자(TESTNET/MOCK)로 먼저 검증하세요.")
     if exceeds_hard_cap:
         warnings.append("실거래 1회 주문 한도 10만원을 초과합니다.")
     if insufficient_cash:
-        warnings.append("예수금 대비 주문 예정 증거금이 큽니다." if exchange == "BINANCE_UM_FUTURES" else "예수금 대비 주문 예정 금액이 큽니다.")
+        warnings.append("예수금 대비 주문 예정 금액이 큽니다.")
     if insufficient_holding:
         warnings.append("보유 수량보다 많은 매도 주문입니다.")
 
@@ -1036,11 +875,8 @@ def _build_precheck_payload(
         "price_source": price_source,
         "estimated_amount": estimated_amount,
         "estimated_amount_krw": estimated_amount_krw,
-        "required_margin": required_margin,
-        "futures_options": normalized_futures_options,
         "real_order_limit_krw": REAL_ORDER_LIMIT_KRW,
         "exceeds_real_order_limit": exceeds_hard_cap,
-        "futures_real_blocked": futures_real_blocked,
         "available_cash": available_cash,
         "holding_qty": holding_qty,
         "holding_value": balance_snapshot["holding_value"],
@@ -1066,17 +902,17 @@ def precheck_manual_order():
         return jsonify({"success": False, "message": f"인증 실패: {str(e)}"}), 401
 
     data = request.json or {}
-    exchange = str(data.get("exchange") or "").upper()
+    exchange = data.get("exchange")
     symbol = data.get("symbol")
     action = data.get("action")
     order_type = data.get("order_type")
     quantity = data.get("quantity")
     price = data.get("price")
-    broker_env = str(data.get("broker_env", "REAL") or "REAL").upper()
+    broker_env = data.get("broker_env", "REAL")
 
     if not exchange or not symbol or not action or not order_type or quantity is None:
         return jsonify({"success": False, "message": "필수 주문 파라미터가 누락되었습니다."}), 400
-    if exchange not in SUPPORTED_TRADE_EXCHANGES:
+    if exchange not in ("TOSS", "KIS", "COINONE", "BINANCE"):
         return jsonify({"success": False, "message": "지원하지 않는 거래소입니다."}), 400
     if action.upper() not in ("BUY", "SELL"):
         return jsonify({"success": False, "message": "올바르지 않은 주문 방향(action)입니다."}), 400
@@ -1098,18 +934,12 @@ def precheck_manual_order():
             record=record,
             access_key=access_key,
             secret_key=secret_key,
-            futures_options={
-                "position_side": data.get("position_side"),
-                "reduce_only": data.get("reduce_only", False),
-                "leverage": data.get("leverage"),
-                "margin_type": data.get("margin_type"),
-            } if exchange == "BINANCE_UM_FUTURES" else None,
         )
         return jsonify({"success": True, "data": payload})
     except ValueError as e:
         return jsonify({"success": False, "message": str(e)}), 400
     except Exception as e:
-        return jsonify(format_error_payload(e, "주문 사전검증 실패", exchange=exchange)), 500
+        return jsonify({"success": False, "message": f"주문 사전검증 실패: {str(e)}"}), 500
 
 @trade_bp.route("/api/trade/order", methods=["POST"])
 def place_manual_order():
@@ -1128,19 +958,19 @@ def place_manual_order():
         return jsonify({"success": False, "message": f"인증 실패: {str(e)}"}), 401
 
     data = request.json or {}
-    exchange = str(data.get("exchange") or "").upper()
+    exchange = data.get("exchange")
     symbol = data.get("symbol")
     action = data.get("action")  # BUY or SELL
     order_type = data.get("order_type")  # LIMIT or MARKET
     price = data.get("price")  # LIMIT일 때 필수
     quantity = data.get("quantity")  # 필수
-    broker_env = str(data.get("broker_env", "REAL") or "REAL").upper()  # MOCK or REAL
+    broker_env = data.get("broker_env", "REAL")  # MOCK or REAL
     
     # 1. 필수 파라미터 검증
     if not exchange or not symbol or not action or not order_type or quantity is None:
         return jsonify({"success": False, "message": "필수 주문 파라미터가 누락되었습니다."}), 400
     
-    if exchange not in SUPPORTED_TRADE_EXCHANGES:
+    if exchange not in ("TOSS", "KIS", "COINONE", "BINANCE"):
         return jsonify({"success": False, "message": "지원하지 않는 거래소입니다."}), 400
 
     if action.upper() not in ("BUY", "SELL"):
@@ -1163,7 +993,7 @@ def place_manual_order():
     except ValueError as e:
         return jsonify({"success": False, "message": str(e)}), 400
     except Exception as e:
-        return jsonify(format_error_payload(e, "API 크리덴셜 로드 및 복호화 실패", exchange=exchange)), 500
+        return jsonify({"success": False, "message": f"API 크리덴셜 로드 및 복호화 실패: {str(e)}"}), 500
 
     # 3. 공통 사전 검증
     try:
@@ -1178,17 +1008,11 @@ def place_manual_order():
             record=record,
             access_key=access_key,
             secret_key=secret_key,
-            futures_options={
-                "position_side": data.get("position_side"),
-                "reduce_only": data.get("reduce_only", False),
-                "leverage": data.get("leverage"),
-                "margin_type": data.get("margin_type"),
-            } if exchange == "BINANCE_UM_FUTURES" else None,
         )
     except ValueError as e:
         return jsonify({"success": False, "message": str(e)}), 400
     except Exception as e:
-        return jsonify(format_error_payload(e, "주문 사전검증 실패", exchange=exchange)), 500
+        return jsonify({"success": False, "message": f"주문 사전검증 실패: {str(e)}"}), 500
 
     order_price = precheck["reference_price"]
     total_amount = precheck["estimated_amount"]
@@ -1198,12 +1022,6 @@ def place_manual_order():
         return jsonify({
             "success": False,
             "message": f"실거래 1회 주문 한도(100,000원)를 초과할 수 없습니다. (신청 금액: {total_amount_krw:,.0f}원)"
-        }), 400
-
-    if precheck.get("futures_real_blocked"):
-        return jsonify({
-            "success": False,
-            "message": "바이낸스 선물 실거래는 현재 잠겨 있습니다. 먼저 MOCK/TESTNET 모의투자로 검증하거나 BINANCE_FUTURES_REAL_ENABLED=true 설정 후 다시 시도하세요."
         }), 400
 
     if precheck["insufficient_cash"]:
@@ -1223,27 +1041,13 @@ def place_manual_order():
         elif exchange == "COINONE":
             client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
             order_res = client.place_order(symbol=symbol, qty=qty, side=action, ord_type=order_type, price=order_price)
-        elif exchange == "BINANCE":
-            client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
-            order_res = client.place_order(symbol=symbol, qty=qty, side=action, ord_type=order_type, price=order_price)
-        elif exchange == "BINANCE_UM_FUTURES":
-            client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
-            order_res = client.place_order(
-                symbol=symbol,
-                qty=qty,
-                side=action,
-                ord_type=order_type,
-                price=order_price,
-                position_side=precheck["futures_options"]["position_side"],
-                reduce_only=precheck["futures_options"]["reduce_only"],
-                leverage=precheck["futures_options"]["leverage"],
-                margin_type=precheck["futures_options"]["margin_type"],
-            )
         else:
             return jsonify({"success": False, "message": f"{exchange} 거래소는 현재 수동 주문 기능이 지원되지 않습니다."}), 400
     except Exception as e:
-        current_app.logger.exception("주문 전송 실패: exchange=%s symbol=%s broker_env=%s", exchange, symbol, broker_env)
-        return jsonify(format_error_payload(e, "주문 전송 실패", exchange=exchange)), 500
+        error_message = str(e)
+        if "\n" in error_message:
+            return jsonify({"success": False, "message": error_message}), 500
+        return jsonify({"success": False, "message": f"주문 전송 실패: {str(e)}"}), 500
 
     # 5. 주문 체결 성공 후 자동 감시(Stop-loss, Take-profit) 바인딩
     order_status_for_db = "EXECUTED" if _is_terminal_order_status(order_res.get("status")) else "APPROVED"
@@ -1299,7 +1103,7 @@ def place_manual_order():
         market_country = None
         if asset_type == "STOCK":
             market_country = determine_market_country(symbol)
-        currency = "KRW" if (exchange not in ("BINANCE", "BINANCE_UM_FUTURES") and market_country != "US") else "USD"
+        currency = "KRW" if (exchange != "BINANCE" and market_country != "US") else "USD"
         
         proposal_data = {
             "user_id": user_id,
@@ -1460,74 +1264,6 @@ def sync_kis_order_statuses():
                     break
             except Exception as exc:
                 errors.append(str(exc)[:200])
-
-    try:
-        coinone_proposals = query_supabase(
-            auth_header,
-            "trade_proposals",
-            "GET",
-            params={
-                "user_id": f"eq.{user_id}",
-                "exchange": "eq.COINONE",
-                "limit": "100",
-                "order": "created_at.desc",
-            },
-        ) or []
-    except Exception as e:
-        coinone_proposals = []
-        errors.append(f"Coinone order sync query failed: {str(e)[:160]}")
-
-    coinone_clients = {}
-    for proposal in coinone_proposals:
-        proposal_id = proposal.get("id")
-        symbol = proposal.get("symbol") or proposal.get("ticker")
-        order_id = proposal.get("external_order_id")
-        status = str(proposal.get("status") or "").upper()
-        if status in {"EXECUTED", "CANCELED", "CANCELLED", "REJECTED", "FAILED"}:
-            continue
-        if not proposal_id or not symbol or not order_id:
-            continue
-
-        broker_env = _resolve_proposal_broker_env(proposal)
-        try:
-            if broker_env not in coinone_clients:
-                record, access_key, secret_key = _load_user_exchange_record(
-                    auth_header,
-                    user_id,
-                    "COINONE",
-                    broker_env,
-                )
-                coinone_clients[broker_env] = _build_exchange_client("COINONE", broker_env, record, access_key, secret_key)
-            client = coinone_clients[broker_env]
-            checked_count += 1
-
-            current_order = client.get_order_status(order_id, symbol=symbol)
-            next_status, coinone_detail = _normalize_coinone_synced_status(
-                current_order,
-                requested_qty=proposal.get("volume"),
-            )
-            sync_detail = {
-                "account": {
-                    "exchange": "COINONE",
-                    "broker_env": broker_env,
-                },
-                "order_status": current_order,
-                "normalized": coinone_detail,
-            }
-            patch_payload = {
-                "status": next_status,
-                "broker_env": broker_env,
-                "failure_reason": None,
-                "raw_order_payload": {"sync_status_check": sync_detail},
-            }
-            if next_status == "CANCELED":
-                patch_payload["canceled_at"] = datetime.utcnow().isoformat() + "Z"
-            if next_status == "FAILED":
-                patch_payload["failure_reason"] = f"Coinone order status: {coinone_detail.get('raw_status') or 'FAILED'}"
-            _patch_trade_proposal(auth_header, proposal_id, patch_payload)
-            synced_count += 1
-        except Exception as exc:
-            errors.append(f"Coinone {symbol}: {str(exc)[:180]}")
 
     return jsonify({
         "success": True,
@@ -1735,7 +1471,7 @@ def cancel_manual_order():
 
     exchange = proposal.get("exchange")
     broker_env = _resolve_proposal_broker_env(proposal, broker_env_override)
-    if exchange not in ("TOSS", "KIS", "COINONE", "BINANCE", "BINANCE_UM_FUTURES"):
+    if exchange not in ("TOSS", "KIS", "COINONE"):
         return jsonify({"success": False, "message": f"{exchange} 주문 취소는 아직 지원하지 않습니다."}), 400
 
     current_status = {}
@@ -1744,7 +1480,7 @@ def cancel_manual_order():
         client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
         symbol = proposal.get("symbol") or proposal.get("ticker")
         try:
-            current_status = client.get_order_status(order_id, symbol=symbol) if exchange in ("COINONE", "BINANCE", "BINANCE_UM_FUTURES") else client.get_order_status(order_id)
+            current_status = client.get_order_status(order_id, symbol=symbol) if exchange == "COINONE" else client.get_order_status(order_id)
         except Exception as status_error:
             if exchange != "TOSS":
                 raise
@@ -1756,7 +1492,7 @@ def cancel_manual_order():
         if exchange == "KIS":
             _ensure_kis_order_modifiable(auth_header, proposal_id, proposal, client)
             cancel_result = client.cancel_order(order_id, order_org_no=_resolve_order_org_no(proposal))
-        elif exchange in ("COINONE", "BINANCE", "BINANCE_UM_FUTURES"):
+        elif exchange == "COINONE":
             cancel_result = client.cancel_order(order_id, symbol=symbol)
         else:
             cancel_result = client.cancel_order(order_id)
@@ -1974,12 +1710,18 @@ def cancel_replace_order():
         return jsonify({"success": False, "message": f"거래내역 조회 실패: {str(e)}"}), 500
 
     exchange = proposal.get("exchange")
-    if exchange not in ("COINONE", "BINANCE", "BINANCE_UM_FUTURES"):
+    if exchange not in ("COINONE", "BINANCE"):
         return jsonify({"success": False, "message": "취소 후 재주문은 Coinone/Binance 주문에만 사용합니다."}), 400
 
     status = str(proposal.get("status") or "").upper()
     if status in {"EXECUTED", "CANCELED", "REJECTED", "FAILED"}:
         return jsonify({"success": False, "message": "이미 완료되었거나 재주문할 수 없는 주문입니다."}), 400
+
+    if proposal.get("external_order_id"):
+        return jsonify({
+            "success": False,
+            "message": f"{exchange} 실제 주문 취소 API 연결 전에는 거래소 주문번호가 있는 주문을 취소 후 재주문할 수 없습니다.",
+        }), 400
 
     try:
         price_value = float(new_price) if new_price not in (None, "") else float(proposal.get("price") or 0)
@@ -1989,45 +1731,11 @@ def cancel_replace_order():
         if quantity_value <= 0:
             return jsonify({"success": False, "message": "재주문 수량은 0보다 커야 합니다."}), 400
 
-        cancel_detail = None
-        replacement_order = None
-        external_order_id = proposal.get("external_order_id")
-        broker_env = _resolve_proposal_broker_env(proposal, data.get("broker_env"))
-        client = None
-        if external_order_id:
-            if exchange != "COINONE":
-                return jsonify({
-                    "success": False,
-                    "message": f"{exchange} 실제 주문 취소 API 연결 전에는 거래소 주문번호가 있는 주문을 취소 후 재주문할 수 없습니다.",
-                }), 400
-            record, access_key, secret_key = _load_user_exchange_record(auth_header, user_id, exchange, broker_env)
-            client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
-            cancel_detail = client.cancel_order(external_order_id, symbol=proposal.get("symbol") or proposal.get("ticker"))
-
-        cancel_patch = {
+        _patch_trade_proposal(auth_header, proposal_id, {
             "status": "CANCELED",
             "failure_reason": None,
             "canceled_at": datetime.utcnow().isoformat() + "Z",
-        }
-        if cancel_detail:
-            cancel_patch["raw_order_payload"] = {"cancel_replace_cancel": cancel_detail}
-        _patch_trade_proposal(auth_header, proposal_id, cancel_patch)
-
-        if exchange == "COINONE" and external_order_id:
-            if client is None:
-                record, access_key, secret_key = _load_user_exchange_record(auth_header, user_id, exchange, broker_env)
-                client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
-            replacement_order = client.place_order(
-                symbol=proposal.get("symbol") or proposal.get("ticker"),
-                qty=quantity_value,
-                side=proposal.get("side"),
-                ord_type=proposal.get("ord_type") or "LIMIT",
-                price=price_value,
-            )
-
-        replacement_status = "PENDING"
-        if replacement_order:
-            replacement_status = "EXECUTED" if _is_terminal_order_status(replacement_order.get("status")) else "APPROVED"
+        })
 
         replacement_payload = {
             "user_id": user_id,
@@ -2035,27 +1743,21 @@ def cancel_replace_order():
             "asset_type": proposal.get("asset_type") or "CRYPTO",
             "ticker": proposal.get("ticker"),
             "symbol": proposal.get("symbol") or proposal.get("ticker"),
-            "broker_env": broker_env,
+            "broker_env": _resolve_proposal_broker_env(proposal, data.get("broker_env")),
             "side": proposal.get("side"),
             "price": price_value,
             "volume": quantity_value,
             "ord_type": proposal.get("ord_type") or "LIMIT",
             "market_country": proposal.get("market_country"),
-            "currency": proposal.get("currency") or ("USD" if exchange in ("BINANCE", "BINANCE_UM_FUTURES") else "KRW"),
+            "currency": proposal.get("currency") or ("USD" if exchange == "BINANCE" else "KRW"),
             "replaced_from_id": proposal_id,
-            "client_order_id": replacement_order.get("client_order_id") if replacement_order else None,
-            "external_order_id": replacement_order.get("order_id") if replacement_order else None,
-            "raw_order_payload": {
-                "cancel_replace_cancel": cancel_detail,
-                "cancel_replace_order": replacement_order.get("raw") if replacement_order else None,
-            },
-            "status": replacement_status,
+            "status": "PENDING",
         }
         created = _insert_trade_proposal_with_schema_fallback(auth_header, replacement_payload)
         return jsonify({
             "success": True,
-            "message": "기존 주문을 취소하고 새 주문을 전송했습니다." if replacement_order else "기존 주문을 취소하고 재주문 제안을 생성했습니다.",
-            "status": replacement_status,
+            "message": "기존 주문 제안을 취소하고 재주문 제안을 생성했습니다.",
+            "status": "PENDING",
             "data": created,
         })
     except ValueError as e:
@@ -2244,17 +1946,7 @@ def _fetch_candles_uncached(cache_key, exchange, symbol, interval, count, broker
             elif interval in ("1h", "60m"):
                 coinone_interval = "1h"
                 
-            symbol_upper = symbol.upper()
-            if symbol_upper.endswith("USDT"):
-                clean_symbol = symbol_upper[:-4]
-            elif symbol_upper.endswith("KRW") and len(symbol_upper) > 3:
-                clean_symbol = symbol_upper[:-3]
-            elif symbol_upper.endswith("_KRW"):
-                clean_symbol = symbol_upper[:-4]
-            else:
-                clean_symbol = symbol_upper
-
-            url = f"https://api.coinone.co.kr/public/v2/chart/KRW/{clean_symbol}"
+            url = f"https://api.coinone.co.kr/public/v2/chart/KRW/{symbol.upper()}"
             res = requests.get(url, params={"interval": coinone_interval})
             if res.status_code != 200:
                 return jsonify({"success": False, "message": f"Coinone 차트 조회 실패: {res.text}"}), 500
@@ -2292,7 +1984,7 @@ def _fetch_candles_uncached(cache_key, exchange, symbol, interval, count, broker
             })
 
         # 4. BINANCE 캔들
-        elif exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
+        elif exchange == "BINANCE":
             # Binance는 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M 지원
             binance_interval = interval
             if interval in ("1d", "day"):
@@ -2518,7 +2210,7 @@ def _fetch_orderbook_uncached(cache_key, exchange, symbol, broker_env, auth_head
                     })
 
         # 2. BINANCE 호가 조회
-        elif exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
+        elif exchange == "BINANCE":
             url = "https://api.binance.com/api/v3/depth"
             res = requests.get(url, params={"symbol": symbol.upper(), "limit": 10}, timeout=5)
             if res.status_code == 200:
@@ -2840,7 +2532,7 @@ def _fetch_trades_uncached(cache_key, exchange, symbol, broker_env, auth_header)
                     })
 
         # 2. BINANCE 체결 조회
-        elif exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
+        elif exchange == "BINANCE":
             url = "https://api.binance.com/api/v3/trades"
             res = requests.get(url, params={"symbol": symbol.upper(), "limit": 20}, timeout=5)
             if res.status_code == 200:
@@ -3128,11 +2820,47 @@ def lookup_symbol():
                 }
             })
 
+    # 4. 부분 일치 매칭 (SYMBOL_METADATA)
+    for sym, meta in SYMBOL_METADATA.items():
+        if query in meta.get("display_name", "").upper() or query in sym:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "symbol": sym,
+                    "display_name": meta.get("display_name"),
+                    "asset_type": meta.get("asset_type"),
+                    "market": meta.get("market")
+                }
+            })
+
+    # 5. 주식 DB 부분 일치 매칭 폴백
+    if db_results:
+        best_match = db_results[0]
+        clean_name = re.sub(r"^KR\d{10}", "", best_match["name"]).strip()
+        return jsonify({
+            "success": True,
+            "data": {
+                "symbol": best_match["symbol"],
+                "display_name": clean_name,
+                "asset_type": "STOCK",
+                "market": "KR"
+            }
+        })
+
+    # 6. 매칭 실패 시 기본값 반환 (Toss 등 신규 등록 주식/코인 대비)
+    fallback_asset_type = "STOCK"
+    if asset_type_hint in ("STOCK", "CRYPTO"):
+        fallback_asset_type = asset_type_hint
+
     return jsonify({
-        "success": False,
-        "message": "검색 결과가 없습니다. 종목명 또는 코드를 다시 확인해 주세요.",
-        "data": None,
-    }), 404
+        "success": True,
+        "data": {
+            "symbol": query,
+            "display_name": query,
+            "asset_type": fallback_asset_type,
+            "market": ""
+        }
+    })
 
 
 @trade_bp.route("/api/trade/history/sync/toss", methods=["POST"])

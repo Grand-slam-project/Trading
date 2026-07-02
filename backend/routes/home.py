@@ -6,15 +6,119 @@ from backend.services.home_service import build_home_overview, fetch_coinone_ove
 from backend.services.kis_client import KISClient
 from backend.services.toss_client import TossClient
 from backend.services.coinone_client import CoinoneClient
-from backend.services.binance_client import BinanceClient, BinanceFuturesClient
+from backend.services.binance_client import BinanceClient
+from backend.services.broker_order_history_service import sync_binance_broker_trades, get_binance_cost_basis_from_history
 from backend.services.auth_service import get_user_id_from_header
 from backend.services.supabase_client import query_supabase
-from backend.services.error_message_service import format_error_payload
 
 home_bp = Blueprint("home", __name__)
 
 KIS_MARKET_MASTER_FILE_PATH = os.getenv("KIS_MARKET_MASTER_FILE_PATH", "")
 MARKET_SYNC_ADMIN_TOKEN = os.getenv("MARKET_SYNC_ADMIN_TOKEN", "")
+PORTFOLIO_EXCHANGES = {"KIS", "TOSS", "COINONE", "BINANCE"}
+
+
+def _normalize_portfolio_exchange(value: str | None) -> str:
+    text = str(value or "").upper()
+    if "KIS" in text:
+        return "KIS"
+    if "TOSS" in text:
+        return "TOSS"
+    if "COINONE" in text:
+        return "COINONE"
+    if "BINANCE" in text:
+        return "BINANCE"
+    return text
+
+
+def _calculate_portfolio_summary(balance: dict, fallback_exchange: str) -> dict:
+    total_cost_amount = 0.0
+    total_evaluation = 0.0
+
+    for holding in balance.get("holdings", []) or []:
+        if str(holding.get("source") or "").upper() == "DB_ESTIMATED":
+            continue
+
+        holding_exchange = (
+            holding.get("raw_exchange")
+            or holding.get("exchange")
+            or holding.get("account_type")
+            or fallback_exchange
+        )
+        normalized_exchange = _normalize_portfolio_exchange(holding_exchange)
+        if normalized_exchange not in PORTFOLIO_EXCHANGES:
+            continue
+
+        cost_amount = to_float(holding.get("cost_amount_krw"))
+        eval_amount = to_float(holding.get("eval_amount_krw"))
+        if normalized_exchange == "BINANCE" and cost_amount <= 0:
+            continue
+        if cost_amount <= 0 and eval_amount <= 0:
+            continue
+
+        total_cost_amount += cost_amount
+        total_evaluation += eval_amount
+
+    available_cash = to_float(balance.get("available_cash"))
+    cash_adjustment_krw = 0.0
+    if available_cash < 0:
+        cash_currency = str(balance.get("available_cash_currency") or balance.get("currency") or "KRW").upper()
+        exchange_rate = to_float(balance.get("exchange_rate")) or 1.0
+        cash_adjustment_krw = available_cash * exchange_rate if cash_currency in {"USD", "USDT"} else available_cash
+
+    total_profit = total_evaluation - total_cost_amount
+    portfolio_profit_rate = (total_profit / total_cost_amount) * 100 if total_cost_amount > 0 else 0.0
+    return {
+        "total_cost_amount": total_cost_amount,
+        "total_evaluation_krw": total_evaluation,
+        "net_total_evaluation_krw": total_evaluation + cash_adjustment_krw,
+        "cash_adjustment_krw": cash_adjustment_krw,
+        "total_profit": total_profit,
+        "portfolio_profit_rate": portfolio_profit_rate,
+        "portfolio_calculation_exchanges": sorted(PORTFOLIO_EXCHANGES),
+        "portfolio_excluded_exchanges": [],
+        "portfolio_excluded_sources": ["DB_ESTIMATED"],
+    }
+
+
+def _enrich_binance_balance_with_cost_basis(balance: dict, cost_basis: dict, exchange_rate: float) -> dict:
+    holdings = []
+    for holding in balance.get("holdings", []) or []:
+        symbol = str(holding.get("symbol") or "").upper()
+        basis = cost_basis.get(symbol)
+        if not basis:
+            holdings.append({
+                **holding,
+                "cost_basis_status": "MISSING_TRADE_HISTORY",
+            })
+            continue
+
+        qty = to_float(holding.get("qty"))
+        current_price = to_float(holding.get("current_price"))
+        eval_amount = current_price * qty
+        avg_price = to_float(basis.get("avg_price"))
+        cost_amount = avg_price * qty
+        profit = eval_amount - cost_amount
+        profit_rate = (profit / cost_amount) * 100 if cost_amount > 0 else 0.0
+
+        holdings.append({
+            **holding,
+            "avg_price": avg_price,
+            "cost_amount": cost_amount,
+            "eval_amount": eval_amount,
+            "profit": profit,
+            "profit_rate": profit_rate,
+            "currency": "USDT",
+            "cost_amount_krw": cost_amount * exchange_rate,
+            "eval_amount_krw": eval_amount * exchange_rate,
+            "profit_krw": profit * exchange_rate,
+            "source": "BINANCE_SYNCED",
+            "cost_basis_status": "READY",
+            "cost_basis_trade_count": basis.get("trade_count"),
+        })
+
+    balance["holdings"] = holdings
+    return balance
 
 
 def require_market_sync_admin():
@@ -235,15 +339,14 @@ def get_dashboard_balance():
     try:
         user_id, token = get_user_id_from_header(auth_header)
         
-        credential_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
         params = {
             "user_id": f"eq.{user_id}",
-            "exchange": f"eq.{credential_exchange}",
+            "exchange": f"eq.{exchange}",
             "broker_env": f"eq.{broker_env}"
         }
         records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
         if not records or len(records) == 0:
-            return jsonify({"success": False, "message": f"등록된 {credential_exchange} ({broker_env}) API 키가 없습니다."}), 404
+            return jsonify({"success": False, "message": f"등록된 {exchange} ({broker_env}) API 키가 없습니다."}), 404
 
         record = records[0]
         crypto_helper = current_app.crypto
@@ -281,29 +384,41 @@ def get_dashboard_balance():
         elif exchange == "BINANCE":
             client = BinanceClient(
                 api_key=access_key,
-                secret_key=secret_key,
-                env=broker_env,
-            )
-            balance = client.get_balance()
-        elif exchange == "BINANCE_UM_FUTURES":
-            client = BinanceFuturesClient(
-                api_key=access_key,
-                secret_key=secret_key,
-                env=broker_env,
+                secret_key=secret_key
             )
             balance = client.get_balance()
         else:
             return jsonify({"success": False, "message": f"지원하지 않는 거래소입니다: {exchange}"}), 400
 
-        exchange_rate = 1500.0
+        exchange_rate = to_float(balance.get("exchange_rate")) or 1500.0
         if exchange == "TOSS" and hasattr(client, "get_exchange_rate"):
-            exchange_rate = client.get_exchange_rate()
+            exchange_rate = exchange_rate or client.get_exchange_rate()
 
         balance["exchange_rate"] = exchange_rate
+        if exchange == "BINANCE":
+            sync_result = None
+            sync_error = None
+            try:
+                sync_result = sync_binance_broker_trades(auth_header, broker_env=broker_env)
+            except Exception as error:
+                sync_error = str(error)[:300]
+            try:
+                cost_basis = get_binance_cost_basis_from_history(auth_header, broker_env=broker_env)
+                balance = _enrich_binance_balance_with_cost_basis(balance, cost_basis, exchange_rate)
+            except Exception as error:
+                sync_error = sync_error or str(error)[:300]
+            balance["cost_basis_source"] = "broker_order_history"
+            balance["cost_basis_sync"] = sync_result
+            balance["cost_basis_error"] = sync_error
+
+        balance.update(_calculate_portfolio_summary(balance, exchange))
 
         return jsonify({
             "success": True,
             "data": balance
         })
     except Exception as e:
-        return jsonify(format_error_payload(e, "잔고 조회 실패", exchange=exchange)), 500
+        return jsonify({
+            "success": False,
+            "message": f"잔고 조회 실패: {str(e)}"
+        }), 500

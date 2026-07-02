@@ -7,10 +7,9 @@ import WatchlistTab from './WatchlistTab.jsx'
 import AssetsTab from './AssetsTab.jsx'
 import TradeHistoryTab from './TradeHistoryTab.jsx'
 import AdminMlData from './AdminMlData.jsx'
-import { getApiErrorMessage } from '../lib/apiError.js'
 
 const DASHBOARD_API_BASE_URL = 'http://localhost:5050'
-const BALANCE_EXCHANGE_ORDER = ['TOSS', 'KIS', 'COINONE', 'BINANCE', 'BINANCE_UM_FUTURES']
+const BALANCE_EXCHANGE_ORDER = ['TOSS', 'KIS', 'COINONE', 'BINANCE']
 const TRADE_PROPOSAL_HOLDING_FIELDS = 'id,exchange,asset_type,ticker,symbol,side,price,volume,order_amount,market_country,currency,status,broker_env,created_at'
 
 const toNumber = (value) => {
@@ -44,26 +43,6 @@ const formatCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate =
   return `₩${Math.round(numeric).toLocaleString()}`
 }
 
-const formatUnitCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate = 1500) => {
-  const numeric = toNumber(value)
-  const rate = toNumber(exchangeRate) || 1500
-
-  if (displayCurrency === 'KRW') {
-    const displayValue = (currency === 'USD' || currency === 'USDT') ? numeric * rate : numeric
-    return `₩${displayValue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}`
-  }
-
-  if (displayCurrency === 'USD') {
-    const displayValue = currency === 'KRW' ? numeric / rate : numeric
-    return `$${displayValue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}`
-  }
-
-  if (currency === 'USD' || currency === 'USDT') {
-    return `$${numeric.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}`
-  }
-  return `₩${numeric.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}`
-}
-
 const formatNullableCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate = 1500) => {
   if (value === null || value === undefined || value === '') return '-'
   return formatCurrency(value, currency, displayCurrency, exchangeRate)
@@ -93,7 +72,6 @@ const getAccountTone = (exchange = '') => {
   if (normalized.includes('TOSS')) return 'border-cyan-500/30 bg-cyan-950/20'
   if (normalized.includes('KIS')) return 'border-blue-500/30 bg-blue-950/20'
   if (normalized.includes('COINONE')) return 'border-amber-500/30 bg-amber-950/20'
-  if (normalized.includes('BINANCE_UM_FUTURES')) return 'border-cyan-500/30 bg-cyan-950/20'
   if (normalized.includes('BINANCE')) return 'border-emerald-500/30 bg-emerald-950/20'
   return 'border-slate-700/80 bg-slate-900/70'
 }
@@ -181,7 +159,7 @@ const fetchDashboardWatchlistCurrentPrice = async (item = {}, authHeader = '') =
     symbol: item.id,
     interval,
     broker_env: brokerEnv,
-    count: '300',
+    count: '1',
   })
   const headers = authHeader ? { Authorization: authHeader } : {}
   const response = await fetch(`${DASHBOARD_API_BASE_URL}/api/chart/candles?${params.toString()}`, { headers })
@@ -245,37 +223,14 @@ const getHoldingEvaluationKrw = (holding = {}, exchangeRate = 1500) => {
   const rate = toNumber(exchangeRate) || 1500
   const rawValue = toNumber(holding.eval_amount) > 0
     ? toNumber(holding.eval_amount)
-    : toNumber(holding.current_price) * Math.abs(toNumber(holding.qty))
+    : toNumber(holding.current_price) * toNumber(holding.qty)
 
   return currency === 'USD' || currency === 'USDT' ? rawValue * rate : rawValue
 }
 
 const getPortfolioProfitRate = (accountBalance) => {
   if (!accountBalance) return 0
-
-  const directRate = accountBalance.portfolio_profit_rate
-    ?? accountBalance.total_profit_rate
-    ?? accountBalance.profit_rate
-
-  if (directRate !== undefined && directRate !== null) {
-    return toNumber(directRate)
-  }
-
-  const holdings = Array.isArray(accountBalance.holdings) ? accountBalance.holdings : []
-  if (holdings.length === 0) return 0
-
-  const totalProfit = holdings.reduce((sum, item) => sum + toNumber(item.profit), 0)
-  const investedAmount = holdings.reduce((sum, item) => {
-    const qty = toNumber(item.qty)
-    const avgPrice = toNumber(item.avg_price)
-    const currentPrice = toNumber(item.current_price)
-    const profit = toNumber(item.profit)
-    const estimatedCost = avgPrice > 0 ? avgPrice * qty : Math.max(0, currentPrice * qty - profit)
-    return sum + estimatedCost
-  }, 0)
-
-  if (investedAmount <= 0) return 0
-  return (totalProfit / investedAmount) * 100
+  return toNumber(accountBalance.portfolio_profit_rate)
 }
 
 const mergeAccountBalances = (items, showMockAssets = true) => {
@@ -290,6 +245,8 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
   const cashUnavailableSources = []
   const cashBreakdown = {}
   const cashBreakdownEntries = []
+  let totalCostAmountKrw = 0
+  let portfolioEvaluationKrw = 0
   
   const holdings = filteredItems.flatMap((item) => {
     const exchange = item.exchange
@@ -304,6 +261,8 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
     }
     
     totalEvaluationKrw += itemEval
+    totalCostAmountKrw += toNumber(item.total_cost_amount)
+    portfolioEvaluationKrw += toNumber(item.total_evaluation_krw)
 
     if (item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '' && Number.isFinite(Number(item.available_cash))) {
       let itemCash = Number(item.available_cash)
@@ -326,14 +285,20 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
     return (item.holdings || []).map((holding) => ({
       ...holding,
       exchange: holding.exchange || exchange,
-      raw_exchange: holding.raw_exchange || item.raw_exchange || exchange,
       account_type: holding.account_type || exchange,
       env: item.env || 'REAL',
+      exchange_rate: item.exchange_rate || representativeRate,
     }))
   })
+  const totalProfitKrw = portfolioEvaluationKrw - totalCostAmountKrw
+  const portfolioProfitRate = totalCostAmountKrw > 0 ? (totalProfitKrw / totalCostAmountKrw) * 100 : 0
 
   return {
     total_evaluation: totalEvaluationKrw,
+    total_cost_amount: totalCostAmountKrw,
+    total_evaluation_krw: portfolioEvaluationKrw,
+    total_profit: totalProfitKrw,
+    portfolio_profit_rate: portfolioProfitRate,
     available_cash: hasCashValue ? availableCashKrw : null,
     currency: 'KRW', // 통합 잔고는 항상 KRW 기준
     exchange_rate: representativeRate,
@@ -352,11 +317,10 @@ const getHoldingIdentity = (holding = {}) => {
   const rawExchange = exchangeText.includes('KIS') ? 'KIS'
     : exchangeText.includes('TOSS') ? 'TOSS'
       : exchangeText.includes('COINONE') ? 'COINONE'
-        : exchangeText.includes('BINANCE_UM_FUTURES') ? 'BINANCE_UM_FUTURES'
-          : exchangeText.includes('BINANCE') ? 'BINANCE'
-            : exchangeText
+        : exchangeText.includes('BINANCE') ? 'BINANCE'
+          : exchangeText
   const env = String(holding.env || (exchangeText.includes('모의') ? 'MOCK' : exchangeText.includes('실전') ? 'REAL' : 'REAL')).toUpperCase()
-  const assetType = String(holding.asset_type || (['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(rawExchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
+  const assetType = String(holding.asset_type || (['COINONE', 'BINANCE'].includes(rawExchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
   return symbol ? `${assetType}:${rawExchange}:${env}:${symbol}` : ''
 }
 
@@ -402,7 +366,7 @@ const buildEstimatedHoldingsFromTrades = (tradeRows = [], liveHoldings = [], sho
     if (!symbol) return
 
     const exchange = String(row.exchange || '').toUpperCase()
-    const assetType = String(row.asset_type || (['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
+    const assetType = String(row.asset_type || (['COINONE', 'BINANCE'].includes(exchange) ? 'CRYPTO' : 'STOCK')).toUpperCase()
     const key = `${assetType}:${exchange}:${env}:${symbol}`
     const side = String(row.side || '').toUpperCase()
     const price = toNumber(row.price)
@@ -417,7 +381,7 @@ const buildEstimatedHoldingsFromTrades = (tradeRows = [], liveHoldings = [], sho
       raw_exchange: exchange || '-',
       account_type: exchange ? `${exchange} ${env === 'MOCK' ? '모의' : '실전'}` : '-',
       env,
-      currency: row.currency || (['BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange) ? 'USD' : 'KRW'),
+      currency: row.currency || (exchange === 'BINANCE' ? 'USD' : 'KRW'),
       qty: 0,
       buyQty: 0,
       buyAmount: 0,
@@ -472,12 +436,6 @@ const getBalanceRequestLabel = (exchange, env) => {
   if (exchange === 'KIS') {
     return `KIS ${env === 'REAL' ? '실전' : '모의'}`
   }
-  if (exchange === 'BINANCE') {
-    return `BINANCE 현물 ${env === 'REAL' ? '실거래' : '모의'}`
-  }
-  if (exchange === 'BINANCE_UM_FUTURES') {
-    return `BINANCE 선물 ${env === 'REAL' ? '실거래' : '모의'}`
-  }
 
   return exchange
 }
@@ -494,8 +452,7 @@ const getBalanceAccountLabel = (exchange, env, account = {}) => {
 
 const buildBalanceRequests = (keyStatus) =>
   BALANCE_EXCHANGE_ORDER.flatMap((exchange) => {
-    const statusExchange = exchange === 'BINANCE_UM_FUTURES' ? 'BINANCE' : exchange
-    const status = keyStatus[statusExchange]
+    const status = keyStatus[exchange]
     if (!status?.registered) return []
 
     const accounts = Array.isArray(status.accounts) && status.accounts.length > 0
@@ -587,12 +544,10 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
         setEncrypted(resData.data.encrypted)
         setBalance(resData.data.balance)
       } else {
-        const message = getApiErrorMessage(resData, 'Key validation failed.')
-        setMessage({ text: message.detail ? `${message.title} ${message.detail}` : message.title, isError: true })
+        setMessage({ text: resData.message || 'Key validation failed.', isError: true })
       }
     } catch (error) {
-      const message = getApiErrorMessage(error, 'Failed to connect to backend server.')
-      setMessage({ text: message.detail ? `${message.title} ${message.detail}` : message.title, isError: true })
+      setMessage({ text: `Failed to connect to backend server: ${error.message}`, isError: true })
     } finally {
       setLoading(false)
     }
@@ -623,7 +578,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       const statusPayload = await statusResponse.json()
 
       if (!statusResponse.ok || !statusPayload.success) {
-        throw statusPayload
+        throw new Error(statusPayload.message || '계정 API 연동 상태를 불러오지 못했습니다.')
       }
 
       const keyStatus = statusPayload.data || {}
@@ -649,21 +604,19 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
             const payload = await response.json()
 
             if (!response.ok || !payload.success) {
-              const message = getApiErrorMessage(payload, `${exchange} 잔고 조회 실패`)
               return {
                 exchange: label,
                 env,
-                error: message.detail ? `${message.title} ${message.detail}` : message.title,
+                error: payload.message || `${exchange} 잔고 조회 실패`,
               }
             }
 
             return { ...payload.data, exchange: label, raw_exchange: exchange, env }
           } catch (error) {
-            const message = getApiErrorMessage(error, `${exchange} 잔고 조회 실패`)
             return {
               exchange: label,
               env,
-              error: message.detail ? `${message.title} ${message.detail}` : message.title,
+              error: error.message || `${exchange} 잔고 조회 실패`,
             }
           }
         }),
@@ -742,9 +695,8 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
         setBalanceError(`일부 계정 조회 실패: ${failedResults.map((item) => item.exchange).join(', ')}`)
       }
     } catch (error) {
-      const message = getApiErrorMessage(error, '계정 자산 조회에 실패했습니다.')
       setBalance(null)
-      setBalanceError(message.detail ? `${message.title} ${message.detail}` : message.title)
+      setBalanceError(`계정 자산 조회 실패: ${error.message}`)
     } finally {
       setBalanceLoading(false)
     }
@@ -831,8 +783,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       }
     })
 
-    const cashValue = Math.max(0, toNumber(balance.available_cash))
-    const allocationTotal = domesticValue + overseasValue + coinValue + cashValue
+    const cashValue = toNumber(balance.available_cash)
+    const allocationCashValue = cashValue > 0 ? cashValue : 0
+    const allocationTotal = domesticValue + overseasValue + coinValue + allocationCashValue
 
     if (allocationTotal <= 0) {
       return [
@@ -847,7 +800,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       { id: 'domestic', label: '국내 주식', amount: domesticValue, color: 'bg-blue-600' },
       { id: 'overseas', label: '해외 주식', amount: overseasValue, color: 'bg-ai-cyan' },
       { id: 'coin', label: '코인', amount: coinValue, color: 'bg-amber-400' },
-      { id: 'cash', label: '현금', amount: cashValue, color: 'bg-slate-500' }
+      { id: 'cash', label: '현금', amount: allocationCashValue, color: 'bg-slate-500' }
     ].map((item) => {
       const exactValue = (item.amount / allocationTotal) * 100
       return {
@@ -1090,7 +1043,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                           const priceDelta = hasSavedPrice && hasCurrentPrice ? currentPrice - savedPrice : 0
                           const priceDeltaRate = hasSavedPrice ? (priceDelta / savedPrice) * 100 : 0
                           const priceDeltaTone = priceDelta > 0 ? 'text-red-400' : priceDelta < 0 ? 'text-blue-400' : 'text-white'
-                          const signedDeltaAmount = `${priceDelta > 0 ? '+' : priceDelta < 0 ? '-' : ''}${formatUnitCurrency(Math.abs(priceDelta), stockCurrency, stockCurrency === 'USD' || stockCurrency === 'USDT' ? displayCurrency : 'KRW', balance?.exchange_rate || 1380)}`
+                          const signedDeltaAmount = `${priceDelta > 0 ? '+' : priceDelta < 0 ? '-' : ''}${formatCurrency(Math.abs(priceDelta), stockCurrency, stockCurrency === 'USD' || stockCurrency === 'USDT' ? displayCurrency : 'KRW', balance?.exchange_rate || 1380)}`
                           const signedDeltaRate = `${priceDeltaRate > 0 ? '+' : ''}${priceDeltaRate.toFixed(2)}%`
                           const exchangeRate = balance?.exchange_rate || 1380
                           const currentDisplayCurrency = stockCurrency === 'USD' || stockCurrency === 'USDT' ? displayCurrency : 'KRW'
@@ -1099,10 +1052,10 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                               <td className="px-3 py-2.5 font-bold text-white">{item.name}</td>
                               <td className="px-3 py-2.5 text-slate-400">{item.market}</td>
                               <td className="px-3 py-2.5 text-right font-mono text-slate-300">
-                                {hasSavedPrice ? formatUnitCurrency(savedPrice, stockCurrency, currentDisplayCurrency, exchangeRate) : '-'}
+                                {hasSavedPrice ? formatCurrency(savedPrice, stockCurrency, currentDisplayCurrency, exchangeRate) : '-'}
                               </td>
                               <td className="px-3 py-2.5 text-right font-mono text-slate-300">
-                                {hasCurrentPrice ? formatUnitCurrency(currentPrice, stockCurrency, currentDisplayCurrency, exchangeRate) : '-'}
+                                {hasCurrentPrice ? formatCurrency(currentPrice, stockCurrency, currentDisplayCurrency, exchangeRate) : '-'}
                               </td>
                               <td className={`px-3 py-2.5 text-right font-mono font-bold ${priceDeltaTone}`}>
                                 {hasSavedPrice && hasCurrentPrice ? `${signedDeltaAmount} (${signedDeltaRate})` : '-'}
@@ -1198,10 +1151,10 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                               </td>
                               <td className="py-3 px-3 text-right text-slate-300">{stock.qty}</td>
                               <td className="py-3 px-3 text-right text-slate-300">
-                                {formatUnitCurrency(stock.avg_price, stockCurrency, currentDisplayCurrency, exchangeRate)}
+                                {formatCurrency(stock.avg_price, stockCurrency, currentDisplayCurrency, exchangeRate)}
                               </td>
                               <td className="py-3 px-3 text-right text-slate-100">
-                                {formatUnitCurrency(stock.current_price, stockCurrency, currentDisplayCurrency, exchangeRate)}
+                                {formatCurrency(stock.current_price, stockCurrency, currentDisplayCurrency, exchangeRate)}
                               </td>
                               <td className={`py-3 px-3 text-right font-semibold ${stock.profit > 0 ? 'text-red-400' : stock.profit < 0 ? 'text-blue-400' : 'text-white'}`}>
                                 {stock.profit > 0 ? '+' : ''}{formatCurrency(stock.profit, stockCurrency, currentDisplayCurrency, exchangeRate)}

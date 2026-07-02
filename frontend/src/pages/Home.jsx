@@ -32,7 +32,13 @@ function formatSnapshotTime(value) {
   });
 }
 
-function changeClass(value) {
+function changeClass(value, row = {}) {
+  if (row.direction === "up" || row.direction === "down") {
+    return row.direction === "up" ? "text-red-400" : "text-sky-400";
+  }
+  const change = numericChange(row);
+  if (change > 0) return "text-red-400";
+  if (change < 0) return "text-sky-400";
   if (String(value).startsWith("+")) return "text-red-400";
   if (String(value).startsWith("-")) return "text-sky-400";
   return "text-slate-400";
@@ -69,8 +75,8 @@ function formatPrice(row) {
   }
   const price = row.price ?? row.current_price ?? row.live_price;
   if (price === undefined || price === null || price === "") return "-";
-  if (isForeignRow(row)) return `$${formatNumber(price, Number(price) % 1 === 0 ? 0 : 1)}`;
-  return `${formatNumber(price, Number(price) % 1 === 0 ? 0 : 1)}원`;
+  if (isForeignRow(row)) return `$${formatNumber(price, Number(price) % 1 === 0 ? 0 : 2)}`;
+  return `${formatNumber(price, Number(price) % 1 === 0 ? 0 : 2)}원`;
 }
 
 function formatChange(row) {
@@ -237,7 +243,7 @@ function MarketTable({ rows, titleType = "stock", ranking = "거래대금", favo
                 </div>
               </div>
               <div className="text-right text-[15px] tabular-nums text-slate-100">{formatPrice(row)}</div>
-              <div className={`text-right text-[15px] font-medium tabular-nums ${changeClass(formatChange(row))}`}>
+              <div className={`text-right text-[15px] font-medium tabular-nums ${changeClass(formatChange(row), row)}`}>
                 {formatChange(row)}
               </div>
               <div className="text-right text-[15px] tabular-nums text-slate-200">{formatValue(row, valueKey, ranking)}</div>
@@ -301,7 +307,7 @@ function MobileMarketTable({ rows, titleType = "stock", ranking = "거래대금"
               </div>
               <div>
                 <div className="text-[10px] text-slate-500">등락률</div>
-                <div className={`mt-1 ${changeClass(formatChange(row))}`}>{formatChange(row)}</div>
+                <div className={`mt-1 ${changeClass(formatChange(row), row)}`}>{formatChange(row)}</div>
               </div>
               <div>
                 <div className="text-[10px] text-slate-500">{valueLabel}</div>

@@ -35,8 +35,7 @@ backend/
 │   ├── keys.py
 │   ├── ml.py
 │   ├── news.py
-│   ├── trade.py
-│   └── transfer.py
+│   └── trade.py
 ├── scripts/
 │   ├── export_news_features.py
 │   ├── export_training_candles.py
@@ -86,7 +85,6 @@ backend/
   - 홈 마켓 스냅샷
 - `routes/`
   - HTTP API 입구
-  - `transfer.py`는 코인원에서 바이낸스로 이동하는 가상자산 출금 사전검증, 승인, 상태 추적 API를 담당
 - `services/`
   - 거래소 연동, Supabase, 스케줄러, ML 운영 로직
 - `scripts/`
@@ -97,19 +95,9 @@ backend/
 - `agent.py`, `trading_engine.py`는 현재 저장소에 없습니다.
 - 토큰 캐시는 현재 `token_cache_service.py`와 Supabase `token_caches`를 기준으로 보는 것이 맞습니다.
 - `coinone_client.py`는 코인원 잔고/현재가/지정가 주문/미체결 주문 취소를 담당하며, 시장가 주문은 아직 운영 경로가 아닙니다.
-- `binance_client.py`는 `BinanceSpotClient`와 `BinanceFuturesClient`를 포함합니다. API Key 저장은 `BINANCE` 레코드 하나를 사용하고, `BINANCE_UM_FUTURES`는 USD-M 선물 잔고/주문/이력 요청 식별자로만 사용합니다. 선물 주문은 레버리지와 교차/격리 마진 타입을 주문 직전에 반영하며, 선물 REAL 주문은 `BINANCE_FUTURES_REAL_ENABLED=true` 환경변수 없이는 차단됩니다.
 - `upbit_client.py`는 남아 있지만 현재 핵심 운영 경로는 아닙니다.
 
 ## frontend
-
-## 2026-07-01 OpenDART 공시 연동 추가 모듈
-
-- `backend/routes/disclosures.py`: 종목 상세 공시 목록 조회 및 수동 공시 동기화 API
-- `backend/services/dart_repository.py`: Supabase `dart_*` 테이블 조회/upsert 저장소
-- `backend/services/dart_ingest.py`: OpenDART 전체 공시 목록 수집, 최근 1년 백필, `CORPCODE.xml` 매핑 동기화 서비스
-- `backend/scripts/sync_dart_corp_codes.py`: 루트 `CORPCODE.xml`을 `dart_corp_codes`에 업서트하는 스크립트
-- `backend/scripts/backfill_dart_disclosures.py`: 최근 1년 공시를 날짜 구간별로 수집해 `dart_disclosures`에 업서트하는 스크립트
-- `supabase/migrations/20260701093000_create_dart_disclosures.sql`: DART 공시 캐시 테이블, 로그 테이블, RLS 정책 생성
 
 ```text
 frontend/
