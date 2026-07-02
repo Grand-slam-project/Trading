@@ -16,6 +16,7 @@ from backend.services.kis_client import KISClient
 from backend.services.coinone_client import CoinoneClient
 from backend.services.binance_client import BinanceClient, BinanceFuturesClient
 from backend.services.error_message_service import format_error_payload
+from backend.services.exchange_client import MARKET_CLOSED_ORDER_MESSAGE, MarketClosedError, is_market_closed_order_error
 
 # 단기 인메모리 시세 캐시 정의 (Rate limit 방지용)
 CANDLE_CACHE = {}
@@ -167,6 +168,14 @@ def is_us_market_open() -> bool:
     start_time = est_now.replace(hour=4, minute=0, second=0, microsecond=0)
     end_time = est_now.replace(hour=20, minute=0, second=0, microsecond=0)
     return start_time <= est_now <= end_time
+
+def is_stock_order_market_open(exchange: str, symbol: str) -> bool:
+    """
+    주식 주문 실패가 거래소 원문 없이 fallback으로 빠질 때 장외 시간 여부를 보정합니다.
+    """
+    if str(exchange or "").upper() not in ("KIS", "TOSS"):
+        return True
+    return is_us_market_open() if determine_market_country(symbol) == "US" else is_kr_market_open()
 
 def get_dynamic_ttl(exchange: str, symbol: str, interval: str) -> int:
     """
@@ -1241,7 +1250,13 @@ def place_manual_order():
             )
         else:
             return jsonify({"success": False, "message": f"{exchange} 거래소는 현재 수동 주문 기능이 지원되지 않습니다."}), 400
+    except MarketClosedError:
+        return jsonify({"success": False, "message": MARKET_CLOSED_ORDER_MESSAGE}), 400
     except Exception as e:
+        if is_market_closed_order_error(str(e)):
+            return jsonify({"success": False, "message": MARKET_CLOSED_ORDER_MESSAGE}), 400
+        if exchange in ("KIS", "TOSS") and not is_stock_order_market_open(exchange, symbol):
+            return jsonify({"success": False, "message": MARKET_CLOSED_ORDER_MESSAGE}), 400
         current_app.logger.exception("주문 전송 실패: exchange=%s symbol=%s broker_env=%s", exchange, symbol, broker_env)
         return jsonify(format_error_payload(e, "주문 전송 실패", exchange=exchange)), 500
 

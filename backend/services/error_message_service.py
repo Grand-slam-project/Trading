@@ -34,8 +34,8 @@ ERROR_GUIDES = {
         },
         "306": {
             "title": "코인원 최소 주문금액보다 작은 주문입니다.",
-            "message": "코인원이 허용하는 최소 주문금액보다 낮아 주문이 거절되었습니다.",
-            "action": "주문 금액을 최소 5,000원 이상으로 조정한 뒤 다시 시도하세요. 수수료와 호가 단위 때문에 여유 있게 입력하는 것이 안전합니다.",
+            "message": "코인원 최소 주문금액보다 작은 주문입니다.",
+            "action": "주문 금액을 최소 5,000원 이상으로 조정한 뒤 다시 시도하세요.\n수수료와 호가 단위 때문에 여유 있게 입력하는 것이 안전합니다.",
             "severity": "warning",
         },
     },
@@ -108,6 +108,30 @@ ERROR_GUIDES = {
         },
     },
     "KIS": {
+        "MARKET_CLOSED": {
+            "title": "주문 전송 실패",
+            "message": "장이 마감되었습니다.",
+            "action": "",
+            "severity": "warning",
+        },
+        "AUTH": {
+            "title": "KIS API 인증 정보를 확인해야 합니다.",
+            "message": "KIS AppKey, AppSecret, 계좌번호 또는 모의/실전 환경 설정이 올바르지 않을 수 있습니다.",
+            "action": "설정 화면에서 KIS API 키와 계좌번호, 계좌상품코드, 모의/실전 구분을 다시 확인한 뒤 연결 테스트를 실행하세요.",
+            "severity": "error",
+        },
+        "ACCOUNT": {
+            "title": "KIS 계좌 상태를 확인해야 합니다.",
+            "message": "KIS 계좌번호, 계좌상품코드 또는 계좌의 주문 가능 상태가 주문 요청과 맞지 않습니다.",
+            "action": "한국투자증권 계좌가 주식 주문 가능한 상태인지 확인하고, 앱에 저장된 계좌번호와 상품코드가 실제 계좌와 일치하는지 확인하세요.",
+            "severity": "warning",
+        },
+        "INSUFFICIENT": {
+            "title": "KIS 주문 가능 잔고가 부족합니다.",
+            "message": "주문 수량 또는 금액이 현재 KIS 계좌의 주문 가능 잔고보다 큽니다.",
+            "action": "예수금과 보유 수량을 확인한 뒤 주문 수량 또는 단가를 낮춰 다시 시도하세요.",
+            "severity": "warning",
+        },
         "EGW00201": {
             "title": "KIS API 호출 한도를 초과했습니다.",
             "message": "한국투자증권 API가 너무 잦은 요청을 제한했습니다.",
@@ -116,6 +140,48 @@ ERROR_GUIDES = {
         },
     },
     "TOSS": {
+        "MARKET_CLOSED": {
+            "title": "주문 전송 실패",
+            "message": "장이 마감되었습니다.",
+            "action": "",
+            "severity": "warning",
+        },
+        "invalid-request": {
+            "title": "Toss 주문 요청 형식이 올바르지 않습니다.",
+            "message": "Toss Open API가 주문 요청 본문의 필드명, 주문유형, 가격 또는 수량 형식을 거절했습니다.",
+            "action": "주문 수량, 지정가 단가, 국내/해외 주식 구분과 주문유형을 확인한 뒤 다시 시도하세요.",
+            "severity": "warning",
+        },
+        "invalid-client": {
+            "title": "Toss API 인증 정보를 확인해야 합니다.",
+            "message": "Toss client_id 또는 client_secret이 올바르지 않거나 토큰 발급 권한이 없습니다.",
+            "action": "설정 화면에서 Toss API 키를 다시 저장하고 계좌 연결 테스트를 실행하세요.",
+            "severity": "error",
+        },
+        "account-not-found": {
+            "title": "Toss 계좌 정보를 찾을 수 없습니다.",
+            "message": "저장된 Toss accountSeq가 없거나 현재 API 키로 조회 가능한 계좌와 일치하지 않습니다.",
+            "action": "Toss 계좌 목록을 다시 조회해 accountSeq를 갱신한 뒤 주문을 다시 시도하세요.",
+            "severity": "warning",
+        },
+        "opposite-pending-order-exists": {
+            "title": "반대 포지션 미체결 주문이 있습니다.",
+            "message": "반대 방향의 미체결 주문이 남아 있어 Toss가 새 주문을 거절했습니다.",
+            "action": "거래내역에서 기존 미체결 주문을 취소하거나 체결 상태를 확인한 뒤 다시 주문하세요.",
+            "severity": "warning",
+        },
+        "modify-restricted": {
+            "title": "Toss 주문 정정 가능 수량이 부족합니다.",
+            "message": "이미 체결되었거나 정정 가능한 잔여 수량이 없어 주문 정정을 할 수 없습니다.",
+            "action": "거래내역을 새로고침해 실제 주문 상태를 확인하고, 체결된 주문은 새 주문으로 처리하세요.",
+            "severity": "warning",
+        },
+        "cancel-restricted": {
+            "title": "Toss 주문 취소 가능 수량이 부족합니다.",
+            "message": "이미 체결되었거나 취소 가능한 잔여 수량이 없어 주문 취소를 할 수 없습니다.",
+            "action": "거래내역을 새로고침해 실제 주문 상태를 확인하세요.",
+            "severity": "warning",
+        },
         "401": {
             "title": "Toss 인증 토큰을 갱신해야 합니다.",
             "message": "Toss API 인증이 만료되었거나 키가 올바르지 않습니다.",
@@ -141,6 +207,50 @@ ERROR_GUIDES = {
 
 
 KEYWORD_GUIDES = [
+    (
+        "MARKET_CLOSED",
+        [
+            "장 마감",
+            "장마감",
+            "장 종료",
+            "장종료",
+            "장운영",
+            "거래시간",
+            "주문 가능 시간",
+            "주문가능시간",
+            "주문 가능한 시간",
+            "주문 가능한 시간이 아닙니다",
+            "주문 시간이 아닙니다",
+            "거래 가능 시간",
+            "거래 가능한 시간이 아닙니다",
+            "주문 불가 시간",
+            "거래 불가 시간",
+            "market-closed",
+            "market_closed",
+            "not-trading-hours",
+            "not_trading_hours",
+            "market closed",
+            "market is closed",
+            "not trading hours",
+            "outside trading hours",
+        ],
+        {
+            "title": "주문 전송 실패",
+            "message": "장이 마감되었습니다.",
+            "action": "",
+            "severity": "warning",
+        },
+    ),
+    (
+        "ACCOUNT",
+        ["accountSeq", "account seq", "계좌", "account not found", "account-not-found", "계좌번호", "CANO", "ACNT_PRDT_CD"],
+        {
+            "title": "거래 계좌 정보를 확인해야 합니다.",
+            "message": "저장된 계좌 정보가 없거나 현재 API 키로 주문 가능한 계좌와 일치하지 않습니다.",
+            "action": "설정 화면에서 거래소 계좌 목록을 다시 조회하고 계좌번호/accountSeq를 갱신한 뒤 다시 시도하세요.",
+            "severity": "warning",
+        },
+    ),
     (
         "NO_MODULE",
         ["No module named", "ModuleNotFoundError"],
@@ -210,6 +320,10 @@ def extract_exchange_error(error: Exception | str) -> dict[str, Any]:
     if binance_match:
         code = binance_match.group(1)
 
+    string_code_match = re.search(r"[\"']code[\"']\s*[:=]\s*[\"']([^\"']+)[\"']", raw_message, re.IGNORECASE)
+    if string_code_match:
+        code = string_code_match.group(1)
+
     egw_match = re.search(r"(EGW\d+)", raw_message, re.IGNORECASE)
     if egw_match:
         code = egw_match.group(1).upper()
@@ -270,6 +384,40 @@ def format_error_payload(
 
     if inferred_exchange == "TOSS" and "zstd" in raw_message.lower():
         code = "ZSTD_DECODE"
+
+    if inferred_exchange in ("KIS", "TOSS") and any(keyword in raw_message.lower() for keyword in (
+        "장 마감",
+        "장마감",
+        "장 종료",
+        "장종료",
+        "장운영",
+        "거래시간",
+        "주문 가능 시간",
+        "주문가능시간",
+        "주문 가능한 시간",
+        "주문가능한시간",
+        "주문 시간이 아닙니다",
+        "주문시간이 아닙니다",
+        "주문 가능한 시간이 아닙니다",
+        "주문가능한시간이아닙니다",
+        "거래 가능 시간",
+        "거래가능시간",
+        "거래 가능한 시간이 아닙니다",
+        "거래가능한시간이아닙니다",
+        "주문 불가 시간",
+        "주문불가시간",
+        "거래 불가 시간",
+        "거래불가시간",
+        "market-closed",
+        "market_closed",
+        "not-trading-hours",
+        "not_trading_hours",
+        "market closed",
+        "market is closed",
+        "not trading hours",
+        "outside trading hours",
+    )):
+        code = "MARKET_CLOSED"
 
     guide = None
     if inferred_exchange and code:

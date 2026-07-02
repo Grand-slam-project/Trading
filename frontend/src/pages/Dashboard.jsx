@@ -1017,7 +1017,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
               </div>
 
               {balanceError ? (
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs font-semibold text-amber-200">
+                <div className="whitespace-pre-line rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs font-semibold text-amber-200">
                   {balanceError}
                 </div>
               ) : null}
@@ -1119,7 +1119,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                         ) : null}
                       </tbody>
                     </table>
-                    {watchlistError ? <p className="mt-2 text-xs text-red-300">{watchlistError}</p> : null}
+                    {watchlistError ? <p className="mt-2 whitespace-pre-line text-xs text-red-300">{watchlistError}</p> : null}
                   </div>
                 </div>
 
