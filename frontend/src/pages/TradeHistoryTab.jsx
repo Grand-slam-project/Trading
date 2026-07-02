@@ -239,10 +239,19 @@ export default function TradeHistoryTab() {
 
       await syncTradeStatuses()
 
-      const { data, error } = await supabase
-        .from('trade_proposals')
-        .select(TRADE_HISTORY_SELECT_FIELDS)
-        .order('created_at', { ascending: false })
+      const [
+        { data: proposalRows, error: proposalError },
+        { data: brokerRows, error: brokerError },
+      ] = await Promise.all([
+        supabase
+          .from('trade_proposals')
+          .select(TRADE_HISTORY_SELECT_FIELDS)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('broker_order_history')
+          .select(BROKER_HISTORY_SELECT_FIELDS)
+          .order('ordered_at', { ascending: false }),
+      ])
 
       if (ignore) return
 
