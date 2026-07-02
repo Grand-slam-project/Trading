@@ -335,13 +335,14 @@ def get_dashboard_balance():
     data = request.json or {}
     exchange = data.get("exchange", "KIS")
     broker_env = data.get("env", "MOCK")
+    target_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
 
     try:
         user_id, token = get_user_id_from_header(auth_header)
         
         params = {
             "user_id": f"eq.{user_id}",
-            "exchange": f"eq.{exchange}",
+            "exchange": f"eq.{target_exchange}",
             "broker_env": f"eq.{broker_env}"
         }
         records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
@@ -383,6 +384,14 @@ def get_dashboard_balance():
             balance = client.get_balance()
         elif exchange == "BINANCE":
             client = BinanceClient(
+                api_key=access_key,
+                secret_key=secret_key,
+                env=broker_env
+            )
+            balance = client.get_balance()
+        elif exchange == "BINANCE_UM_FUTURES":
+            from backend.services.binance_client import BinanceFuturesClient
+            client = BinanceFuturesClient(
                 api_key=access_key,
                 secret_key=secret_key,
                 env=broker_env
