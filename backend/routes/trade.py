@@ -242,9 +242,10 @@ def _query_user_exchange_records(auth_header: str, user_id: str, exchange: str, 
     사용자 거래소 크리덴셜 레코드를 조회합니다.
     broker_env가 없으면 해당 거래소의 전체 레코드를 반환합니다.
     """
+    target_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
     params = {
         "user_id": f"eq.{user_id}",
-        "exchange": f"eq.{exchange}",
+        "exchange": f"eq.{target_exchange}",
     }
     if broker_env:
         params["broker_env"] = f"eq.{broker_env}"
