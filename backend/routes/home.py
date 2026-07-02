@@ -384,7 +384,8 @@ def get_dashboard_balance():
         elif exchange == "BINANCE":
             client = BinanceClient(
                 api_key=access_key,
-                secret_key=secret_key
+                secret_key=secret_key,
+                env=broker_env
             )
             balance = client.get_balance()
         else:
