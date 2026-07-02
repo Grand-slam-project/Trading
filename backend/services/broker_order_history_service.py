@@ -87,7 +87,7 @@ def _binance_symbol_assets(symbol: str) -> tuple[str, str]:
     return text, ""
 
 
-def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade):
+def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade, exchange="BINANCE"):
     base_asset, quote_asset = _binance_symbol_assets(symbol)
     price = _to_float(trade.get("price")) or 0.0
     qty = _to_float(trade.get("qty")) or 0.0
@@ -99,7 +99,7 @@ def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade):
 
     return {
         "user_id": user_id,
-        "exchange": "BINANCE",
+        "exchange": exchange,
         "broker_env": str(broker_env or "REAL").upper(),
         "external_order_id": order_trade_id,
         "external_trade_id": trade_id or None,
@@ -107,8 +107,8 @@ def _map_binance_trade_to_history_row(user_id, broker_env, symbol, trade):
         "base_asset": base_asset or None,
         "quote_asset": quote_asset or None,
         "market_country": "US",
-        "side": "BUY" if trade.get("isBuyer") else "SELL",
-        "order_type": "SPOT",
+        "side": "BUY" if trade.get("isBuyer") or trade.get("buyer") else "SELL",
+        "order_type": "FUTURES" if exchange == "BINANCE_UM_FUTURES" else "SPOT",
         "status": "EXECUTED",
         "raw_status": "FILLED",
         "currency": "USDT" if quote_asset in {"USDT", "BUSD", "USDC"} else (quote_asset or "USDT"),
@@ -360,12 +360,13 @@ def sync_toss_broker_orders(
     }
 
 
-def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, limit=1000):
+def sync_binance_broker_trades(auth_header, exchange="BINANCE", broker_env="REAL", symbols=None, limit=1000):
     """
-    Fetch Binance personal spot trades and store them in broker_order_history.
+    Fetch Binance personal spot or futures trades and store them in broker_order_history.
     """
     user_id, _ = get_user_id_from_header(auth_header)
     normalized_env = str(broker_env or "REAL").upper()
+    target_exchange = "BINANCE" if exchange in ("BINANCE", "BINANCE_UM_FUTURES") else exchange
 
     records = query_supabase(
         auth_header,
@@ -373,21 +374,30 @@ def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, lim
         "GET",
         params={
             "user_id": f"eq.{user_id}",
-            "exchange": "eq.BINANCE",
+            "exchange": f"eq.{target_exchange}",
             "broker_env": f"eq.{normalized_env}",
             "limit": "1",
         },
     )
     if not records:
-        raise ValueError(f"등록된 BINANCE ({normalized_env}) API 키 정보가 없습니다.")
+        raise ValueError(f"등록된 {target_exchange} ({normalized_env}) API 키 정보가 없습니다.")
 
     record = records[0]
     crypto_helper = current_app.crypto
-    client = BinanceClient(
-        api_key=crypto_helper.decrypt(record.get("encrypted_access_key")),
-        secret_key=crypto_helper.decrypt(record.get("encrypted_secret_key")),
-        env=normalized_env,
-    )
+    
+    if exchange == "BINANCE_UM_FUTURES":
+        from backend.services.binance_client import BinanceFuturesClient
+        client = BinanceFuturesClient(
+            api_key=crypto_helper.decrypt(record.get("encrypted_access_key")),
+            secret_key=crypto_helper.decrypt(record.get("encrypted_secret_key")),
+            env=normalized_env,
+        )
+    else:
+        client = BinanceClient(
+            api_key=crypto_helper.decrypt(record.get("encrypted_access_key")),
+            secret_key=crypto_helper.decrypt(record.get("encrypted_secret_key")),
+            env=normalized_env,
+        )
 
     DEFAULT_MAJOR_SYMBOLS = {"BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT"}
     if symbols:
@@ -409,7 +419,7 @@ def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, lim
         try:
             trades = client.list_my_trades(symbol, limit=limit)
             rows = [
-                _map_binance_trade_to_history_row(user_id, normalized_env, symbol, trade)
+                _map_binance_trade_to_history_row(user_id, normalized_env, symbol, trade, exchange=exchange)
                 for trade in trades
                 if trade.get("id") is not None
             ]
@@ -421,7 +431,7 @@ def sync_binance_broker_trades(auth_header, broker_env="REAL", symbols=None, lim
             results.append({"symbol": symbol, "fetched_count": 0, "error": str(error)[:300]})
 
     return {
-        "exchange": "BINANCE",
+        "exchange": exchange,
         "broker_env": normalized_env,
         "symbols": sync_symbols,
         "synced_count": synced_count,
