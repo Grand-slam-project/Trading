@@ -39,10 +39,18 @@ class BinanceClient:
     """
     Binance API client for account balances and personal trade history.
     """
-    def __init__(self, api_key: str, secret_key: str):
+    SPOT_BASE_URLS = {
+        "REAL": "https://api.binance.com",
+        "MOCK": "https://demo-api.binance.com",
+        "DEMO": "https://demo-api.binance.com",
+        "TESTNET": "https://testnet.binance.vision",
+    }
+
+    def __init__(self, api_key: str, secret_key: str, env: str = "REAL"):
         self.api_key = api_key
         self.secret_key = secret_key.encode("utf-8")
-        self.base_url = "https://api.binance.com"
+        self.env = str(env or "REAL").upper()
+        self.base_url = self.SPOT_BASE_URLS.get(self.env, self.SPOT_BASE_URLS["REAL"])
 
     def _sign(self, query_params: dict) -> str:
         query_string = urlencode(query_params)
