@@ -43,7 +43,7 @@ const getAutoTriggerLabel = (triggerSide) => {
   const normalized = String(triggerSide || '').toUpperCase()
   if (normalized === 'TAKE_PROFIT') return '익절 도달'
   if (normalized === 'STOP_LOSS') return '손절 도달'
-  return '-'
+  return '아직 미도달'
 }
 
 export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userProfile }) {
@@ -169,6 +169,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [disclosureList, setDisclosureList] = useState([])
   const [loadingDisclosures, setLoadingDisclosures] = useState(false)
   const [selectedDisclosureId, setSelectedDisclosureId] = useState('')
+  const [disclosureAnalyses, setDisclosureAnalyses] = useState({})
+  const [disclosureAnalysisLoadingId, setDisclosureAnalysisLoadingId] = useState('')
   const [disclosureSyncing, setDisclosureSyncing] = useState(false)
   const [disclosureSyncMessage, setDisclosureSyncMessage] = useState({ text: '', isError: false })
   const [displayName, setDisplayName] = useState(symbol)
@@ -233,6 +235,58 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     return `Bearer ${session.access_token}`
   }
 
+  const normalizeCryptoBaseSymbol = (value) => {
+    let normalized = String(value || '').trim().toUpperCase()
+    if (!normalized) return ''
+    normalized = normalized.replace('_', '-').replace('/', '-')
+    const parts = normalized.split('-').filter(Boolean)
+    if (parts.length === 2) {
+      if (['KRW', 'USDT', 'BUSD', 'USDC'].includes(parts[0])) return parts[1]
+      if (['KRW', 'USDT', 'BUSD', 'USDC'].includes(parts[1])) return parts[0]
+    }
+    for (const suffix of ['USDT', 'BUSD', 'USDC', 'KRW']) {
+      if (normalized.endsWith(suffix) && normalized.length > suffix.length) {
+        return normalized.slice(0, -suffix.length)
+      }
+    }
+    return normalized
+  }
+
+  const getDetailBaseSymbol = () => (
+    resolvedAssetType === 'CRYPTO'
+      ? normalizeCryptoBaseSymbol(symbol)
+      : String(symbol || '').trim().toUpperCase()
+  )
+
+  const getExchangeSymbol = (targetExchange = exchange) => {
+    if (resolvedAssetType !== 'CRYPTO') return String(symbol || '').trim().toUpperCase()
+    const baseSymbol = getDetailBaseSymbol()
+    if (!baseSymbol) return ''
+    if (targetExchange === 'COINONE') return baseSymbol
+    if (['BINANCE', 'BINANCE_UM_FUTURES'].includes(targetExchange)) return `${baseSymbol}USDT`
+    return baseSymbol
+  }
+
+  const getSymbolQueryCandidates = () => {
+    const rawSymbol = String(symbol || '').trim().toUpperCase()
+    if (resolvedAssetType !== 'CRYPTO') {
+      return [...new Set([rawSymbol, rawSymbol.replace(/^A(?=\d{6}$)/, '')].filter(Boolean))]
+    }
+    const baseSymbol = normalizeCryptoBaseSymbol(rawSymbol)
+    return [...new Set([
+      baseSymbol,
+      `${baseSymbol}USDT`,
+      `KRW-${baseSymbol}`,
+      `${baseSymbol}KRW`,
+      `${baseSymbol}/USDT`,
+      `${baseSymbol}/KRW`,
+    ].filter(Boolean))]
+  }
+
+  const buildSymbolOrFilter = () => getSymbolQueryCandidates()
+    .flatMap((candidate) => [`symbol.eq.${candidate}`, `ticker.eq.${candidate}`])
+    .join(',')
+
   const loadOpenOrders = async () => {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session?.user?.id || !symbol) {
@@ -242,13 +296,12 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
 
     setOpenOrdersLoading(true)
     try {
-      const normalizedSymbol = String(symbol || '').trim().toUpperCase()
       let query = supabase
         .from('trade_proposals')
         .select(OPEN_ORDER_SELECT_FIELDS)
         .eq('exchange', exchange)
         .in('status', ACTIONABLE_ORDER_STATUSES)
-        .or(`symbol.eq.${normalizedSymbol},ticker.eq.${normalizedSymbol}`)
+        .or(buildSymbolOrFilter())
         .order('created_at', { ascending: false })
         .limit(8)
 
@@ -280,12 +333,11 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
 
     setAutoRulesLoading(true)
     try {
-      const normalizedSymbol = String(symbol || '').trim().toUpperCase()
       const primaryResult = await supabase
         .from('auto_trading_rules')
         .select(AUTO_RULE_SELECT_FIELDS)
         .eq('exchange', exchange)
-        .or(`symbol.eq.${normalizedSymbol},ticker.eq.${normalizedSymbol}`)
+        .or(buildSymbolOrFilter())
         .order('created_at', { ascending: false })
         .limit(5)
 
@@ -294,7 +346,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
           .from('auto_trading_rules')
           .select('id,exchange,asset_type,ticker,entry_price,investment_amount,target_profit_rate,stop_loss_rate,status,created_at,updated_at')
           .eq('exchange', exchange)
-          .eq('ticker', normalizedSymbol)
+          .in('ticker', getSymbolQueryCandidates())
           .order('created_at', { ascending: false })
           .limit(5)
         if (legacyResult.error) throw primaryResult.error
@@ -453,11 +505,10 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       return
     }
 
-    const normalizedSymbol = String(symbol).trim().toUpperCase()
     const { data, error } = await supabase
       .from('trade_proposals')
       .select('id,exchange,broker_env,symbol,ticker,side,status,volume,price,created_at')
-      .or(`symbol.eq.${normalizedSymbol},ticker.eq.${normalizedSymbol}`)
+      .or(buildSymbolOrFilter())
       .order('created_at', { ascending: false })
 
     if (error || !data?.length) {
@@ -719,7 +770,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       const resData = await response.json()
       if (resData.success && resData.data && resData.data.items) {
         setDisclosureList(resData.data.items)
-        setSelectedDisclosureId(resData.data.items[0]?.id || '')
+        setSelectedDisclosureId('')
       }
     } catch (error) {
       console.error('공시 목록 로드 실패:', error)
@@ -760,6 +811,53 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       })
     } finally {
       setDisclosureSyncing(false)
+    }
+  }
+
+  const handleToggleDisclosureAnalysis = async (item) => {
+    const disclosureId = item?.id || ''
+    const rceptNo = item?.rcept_no || ''
+    if (!disclosureId || !rceptNo) return
+
+    if (selectedDisclosureId === disclosureId && disclosureAnalyses[rceptNo]) {
+      setSelectedDisclosureId('')
+      return
+    }
+
+    setSelectedDisclosureId(disclosureId)
+    if (disclosureAnalyses[rceptNo]) return
+
+    setDisclosureAnalysisLoadingId(disclosureId)
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/disclosures/${rceptNo}/analysis`)
+      const resData = await response.json()
+      if (!response.ok || !resData.success) {
+        throw new Error(resData.message || '공시 분석을 불러오지 못했습니다.')
+      }
+      const analysis = resData.data?.analysis
+      if (analysis) {
+        setDisclosureAnalyses((prev) => ({
+          ...prev,
+          [rceptNo]: analysis,
+        }))
+      }
+    } catch (error) {
+      setDisclosureAnalyses((prev) => ({
+        ...prev,
+        [rceptNo]: {
+          sentiment: 'info',
+          sentiment_label: '정보',
+          sentiment_message: '공시 분석을 불러오지 못했습니다.',
+          confidence: 'low',
+          headline: error.message || '공시 분석을 불러오지 못했습니다.',
+          key_points: ['잠시 후 다시 시도하거나 원문을 확인해 주세요.'],
+          risk_points: [],
+          metrics: [],
+          analysis_source: 'ERROR',
+        },
+      }))
+    } finally {
+      setDisclosureAnalysisLoadingId('')
     }
   }
 
@@ -835,6 +933,21 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     if (normalized === 'NAVER') return '네이버'
     if (normalized === 'FINNHUB') return 'Finnhub'
     return source || 'NEWS'
+  }
+
+  const formatDisclosureDate = (value) => {
+    const text = String(value || '').trim()
+    if (/^\d{8}$/.test(text)) {
+      return `${text.slice(0, 4)}.${text.slice(4, 6)}.${text.slice(6, 8)}`
+    }
+    return text || '-'
+  }
+
+  const getDisclosureToneClass = (sentiment) => {
+    if (sentiment === 'positive') return 'border-emerald-400/35 bg-emerald-500/10 text-emerald-200'
+    if (sentiment === 'negative') return 'border-rose-400/35 bg-rose-500/10 text-rose-200'
+    if (sentiment === 'caution') return 'border-amber-400/35 bg-amber-500/10 text-amber-200'
+    return 'border-cyan-400/25 bg-cyan-500/10 text-cyan-100'
   }
 
   const formatTimestamp = (value) => {
@@ -953,6 +1066,14 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     return `${(numberValue * 100).toFixed(digits)}%`
   }
 
+  const formatSignedPercentValue = (value, digits = 2) => {
+    if (value === null || value === undefined || value === '') return '-'
+    const numberValue = Number(value)
+    if (Number.isNaN(numberValue)) return '-'
+    const sign = numberValue > 0 ? '+' : ''
+    return `${sign}${numberValue.toFixed(digits)}%`
+  }
+
   const normalizeCandleTime = (rawTime) => {
     if (typeof rawTime === 'number' && !Number.isNaN(rawTime)) {
       return rawTime
@@ -989,6 +1110,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     const normalized = String(value || '').trim().toUpperCase()
     if (/^A\d{6}$/.test(normalized)) {
       return normalized.slice(1)
+    }
+    if (resolvedAssetType === 'CRYPTO') {
+      return normalizeCryptoBaseSymbol(normalized)
     }
     return normalized
   }
@@ -1055,7 +1179,8 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     try {
       const chartEx = exchange;
       const chartEnv = brokerEnv;
-      const url = `${API_BASE_URL}/api/chart/candles?exchange=${chartEx}&symbol=${symbol}&interval=${chartInterval}&broker_env=${chartEnv}&count=300`
+      const chartSymbol = getExchangeSymbol(chartEx)
+      const url = `${API_BASE_URL}/api/chart/candles?exchange=${chartEx}&symbol=${chartSymbol}&interval=${chartInterval}&broker_env=${chartEnv}&count=300`
       const headers = {}
       if (authHeader) {
         headers['Authorization'] = authHeader
@@ -1305,7 +1430,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         },
         body: JSON.stringify({
           exchange,
-          symbol,
+          symbol: getExchangeSymbol(exchange),
           action: effectiveSide,
           order_type: orderType,
           quantity: Number(quantity),
@@ -1444,17 +1569,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       return
     }
     
-    const symUpper = String(symbol || '').toUpperCase()
-    const isUsdtMarket = symUpper.endsWith('USDT') || symUpper.endsWith('BUSD')
-
-    if (isUsdtMarket) {
-      if (!['BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange)) {
-        setExchange('BINANCE')
-      }
-    } else {
-      if (!['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange)) {
-        setExchange('COINONE')
-      }
+    if (!['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange)) {
+      const routeSymbol = String(symbol || '').toUpperCase()
+      setExchange(routeSymbol.endsWith('USDT') || routeSymbol.endsWith('BUSD') ? 'BINANCE' : 'COINONE')
     }
 
     if (exchange !== 'BINANCE_UM_FUTURES' && brokerEnv !== 'REAL') {
@@ -1702,7 +1819,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     try {
       const payload = {
         exchange,
-        symbol,
+        symbol: getExchangeSymbol(exchange),
         action: effectiveSide,
         order_type: orderType,
         quantity: parseFloat(quantity),
@@ -1791,13 +1908,37 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const holdingSummaryLabel = myHolding && myHoldingAbsQty > 0
     ? `${myHoldingAbsQty.toLocaleString()} ${exchange === 'BINANCE_UM_FUTURES' ? '계약' : '주'}`
     : dbEstimatedHolding
-      ? `${dbEstimatedHolding.estimatedQty.toLocaleString()} 주 추정`
+      ? `${dbEstimatedHolding.estimatedQty.toLocaleString()} ${dbEstimatedHolding.exchange === 'BINANCE_UM_FUTURES' ? '계약' : resolvedAssetType === 'CRYPTO' ? '개' : '주'} 추정`
       : '보유 없음'
   const availableCashLabel = orderPrecheck?.available_cash != null
     ? `${getCurrencySign()}${Number(orderPrecheck.available_cash).toLocaleString(undefined, { maximumFractionDigits: getCurrencyDigits() })}`
     : Number.isFinite(baseAvailableCash)
       ? `${getCurrencySign()}${baseAvailableCash.toLocaleString(undefined, { maximumFractionDigits: getCurrencyDigits() })}`
       : '잔고 조회 필요'
+  const getEstimatedHoldingUnit = (holding) => {
+    if (holding?.exchange === 'BINANCE_UM_FUTURES') return '계약'
+    if (resolvedAssetType === 'CRYPTO') return '개'
+    return '주'
+  }
+  const getEstimatedHoldingCurrencySign = (holding) => (
+    ['BINANCE', 'BINANCE_UM_FUTURES'].includes(String(holding?.exchange || '').toUpperCase()) ? '$' : getCurrencySign()
+  )
+  const getEstimatedHoldingNotice = (holding) => {
+    const estimatedExchange = String(holding?.exchange || exchange || '').toUpperCase()
+    if (estimatedExchange === 'BINANCE_UM_FUTURES') {
+      return '거래내역에는 선물 주문 기록이 있지만, 현재 선택 계좌의 실제 선물 포지션 API에서는 확인되지 않았습니다. 청산 주문은 실제 바이낸스 선물 포지션 수량이 있어야 성공합니다. 거래내역 상태 동기화를 먼저 실행해 보세요.'
+    }
+    if (estimatedExchange === 'BINANCE') {
+      return '거래내역에는 체결 매수 기록이 있지만, 현재 선택 계좌의 실제 바이낸스 현물 잔고 API에서는 확인되지 않았습니다. 매도 주문은 실제 바이낸스 현물 잔고에 수량이 있어야 성공합니다.'
+    }
+    if (estimatedExchange === 'COINONE') {
+      return '거래내역에는 체결 매수 기록이 있지만, 현재 선택 계좌의 실제 코인원 잔고 API에서는 확인되지 않았습니다. 매도 주문은 실제 코인원 잔고에 수량이 있어야 성공합니다.'
+    }
+    if (estimatedExchange === 'TOSS') {
+      return '거래내역에는 체결 매수 기록이 있지만, 현재 선택 계좌의 실제 토스증권 잔고 API에서는 확인되지 않았습니다. 매도 주문은 실제 토스증권 잔고에 수량이 있어야 성공합니다.'
+    }
+    return '거래내역에는 체결 매수 기록이 있지만, 현재 선택 계좌의 실제 KIS 잔고 API에서는 확인되지 않았습니다. 매도 주문은 실제 KIS 잔고에 수량이 있어야 성공합니다.'
+  }
 
   const handleFillFullExitOrder = () => {
     const exitQty = myHoldingAbsQty || dbEstimatedHolding?.estimatedQty || 0
@@ -2190,6 +2331,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   </div>
                   <p className="mt-1 text-[10px] text-slate-500">
                     익절/손절 감시 규칙은 백그라운드 워커가 조건 도달 여부를 확인합니다.
+                    트리거는 조건이 실제로 발동된 사유입니다.
                   </p>
                 </div>
                 <button
@@ -2221,6 +2363,14 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                     const targetPrice = entryPrice > 0 ? entryPrice * (1 + targetRate / 100) : 0
                     const stopPrice = entryPrice > 0 ? entryPrice * (1 + stopRate / 100) : 0
                     const isRunning = String(rule.status || '').toUpperCase() === 'RUNNING'
+                    const currentReturnRate = entryPrice > 0 && currentPrice > 0
+                      ? ((Number(currentPrice) - entryPrice) / entryPrice) * 100
+                      : null
+                    const currentReturnClass = currentReturnRate === null
+                      ? 'text-slate-300'
+                      : currentReturnRate >= 0
+                        ? 'text-rose-300'
+                        : 'text-blue-300'
 
                     return (
                       <div key={rule.id} className="rounded-lg border border-[#1f2945] bg-[#070b19]/90 p-3">
@@ -2275,11 +2425,20 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                             </p>
                           </div>
                         </div>
-                        <div className="mt-3 grid grid-cols-1 gap-2 border-t border-[#1f2945] pt-3 text-[10px] text-slate-500 sm:grid-cols-3">
+                        <div className="mt-3 grid grid-cols-1 gap-2 border-t border-[#1f2945] pt-3 text-[10px] text-slate-500 sm:grid-cols-4">
                           <div>
                             <p>마지막 확인</p>
                             <p className="font-mono text-slate-300">
                               {rule.last_checked_at ? new Date(rule.last_checked_at).toLocaleString('ko-KR') : '-'}
+                            </p>
+                          </div>
+                          <div>
+                            <p>현재 수익률</p>
+                            <p className={`font-mono font-bold ${currentReturnClass}`}>
+                              {formatSignedPercentValue(currentReturnRate)}
+                            </p>
+                            <p className="font-mono text-[10px] text-slate-600">
+                              현재가 {currentPrice > 0 ? formatUnitPrice(currentPrice) : '-'}
                             </p>
                           </div>
                           <div>
@@ -2342,25 +2501,25 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                         <>
                           {newsList.slice(0, 10).map(item => (
                             <div key={item.id} className="flex flex-col gap-2 border-b border-[#1f2945]/30 px-1 py-2 transition-all hover:bg-slate-800/10">
-                              <div className="flex min-w-0 flex-col gap-2">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <button
                                   type="button"
                                   onClick={() => handleToggleNewsSummary(item)}
-                                  className="block w-full min-w-0 text-left text-xs text-[#e2e2ec] hover:text-cyan-200"
+                                  className="min-w-0 text-left text-xs text-[#e2e2ec] hover:text-cyan-200"
                                 >
                                   <span className="block w-full max-w-full overflow-hidden text-ellipsis whitespace-nowrap pr-2 font-bold leading-5">
                                     {item.title}
                                   </span>
                                   <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                    <span className="rounded border border-cyan-500/25 bg-cyan-950/25 px-1.5 py-0.5 text-[10px] font-bold text-cyan-200">
+                                    <span className="rounded border border-cyan-500/25 bg-cyan-950/25 px-1.5 py-0.5 text-[11px] font-bold text-cyan-200">
                                       {formatNewsSource(item.source)}
                                     </span>
-                                    <span className="rounded border border-slate-600/60 bg-slate-900/50 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-slate-200">
+                                    <span className="rounded border border-cyan-500/20 bg-cyan-950/10 px-1.5 py-0.5 text-[11px] font-[550] text-white">
                                       {formatTime(item.published_at)}
                                     </span>
                                   </span>
                                 </button>
-                                <div className="flex shrink-0 items-center justify-end gap-2">
+                                <div className="flex shrink-0 items-center gap-2">
                                   <button
                                     type="button"
                                     onClick={() => handleToggleNewsSummary(item)}
@@ -2415,9 +2574,11 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
               {activeTab === 'disclosure' && (
                 <div className="max-h-[360px] overflow-y-auto pr-1">
                   <section className="min-h-[220px] rounded-lg border border-[#1f2945]/70 bg-[#07111f]/70 p-4">
-                    <div className="mb-3 flex items-center justify-between border-b border-[#1f2945]/50 pb-2">
-                      <h3 className="text-xs font-bold text-cyan-300">공시</h3>
-                      <span className="text-[10px] font-mono text-slate-500">{disclosureList.length}건 · DART</span>
+                    <div className="mb-3 flex items-center justify-between gap-3 border-b border-[#1f2945]/50 pb-2">
+                      <h3 className="text-sm font-bold text-cyan-200">공시</h3>
+                      <span className="rounded-full border border-cyan-500/30 bg-cyan-950/30 px-2.5 py-1 text-[11px] font-bold text-cyan-100">
+                        총 {Math.min(disclosureList.length, 10)}개
+                      </span>
                     </div>
                     <div className="flex flex-col gap-3">
                       {loadingDisclosures ? (
@@ -2426,42 +2587,120 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                         </div>
                       ) : disclosureList.length > 0 ? (
                         <>
-                          {disclosureList.slice(0, 10).map(item => (
-                            <div key={item.id} className="flex flex-col gap-2 border-b border-[#1f2945]/30 px-1 py-2 transition-all hover:bg-slate-800/10">
-                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedDisclosureId((prev) => prev === item.id ? '' : item.id)}
-                                  className="min-w-0 text-left text-xs text-[#e2e2ec] hover:text-cyan-200"
-                                >
-                                  <span className="block truncate font-bold">{item.report_nm}</span>
-                                  <span className="mt-0.5 block text-[10px] font-mono text-slate-500">{item.corp_name} · {item.rcept_dt}</span>
-                                </button>
-                                <div className="flex shrink-0 items-center gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setSelectedDisclosureId((prev) => prev === item.id ? '' : item.id)}
-                                    className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-950/30"
-                                  >
-                                    요약 보기
-                                  </button>
-                                  <a
-                                    href={item.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
-                                  >
-                                    원문 열기
-                                  </a>
+                          {disclosureList.slice(0, 10).map(item => {
+                              const analysis = disclosureAnalyses[item.rcept_no]
+                              const isOpen = selectedDisclosureId === item.id
+                              const isLoadingAnalysis = disclosureAnalysisLoadingId === item.id
+                              const points = Array.isArray(analysis?.key_points) ? analysis.key_points : []
+                              const risks = Array.isArray(analysis?.risk_points) ? analysis.risk_points : []
+                              const metrics = Array.isArray(analysis?.metrics) ? analysis.metrics : []
+                              const checkItems = Array.isArray(analysis?.check_items) ? analysis.check_items : []
+                              const metricLabels = new Set(metrics.map(metric => metric?.label).filter(Boolean))
+                              const duplicateCheckMetricMap = {
+                                '계약 규모': ['계약금액', '매출액대비'],
+                                '계약 상대': ['계약상대'],
+                                '계약 기간': ['계약기간'],
+                              }
+                              const visibleCheckItems = checkItems.filter((check) => {
+                                const duplicateMetricLabels = duplicateCheckMetricMap[check?.question] || []
+                                if (duplicateMetricLabels.some(label => metricLabels.has(label))) return false
+                                return check?.answer && check.answer !== '확인 필요'
+                              })
+
+                              return (
+                                <div key={item.id} className="flex flex-col gap-2 border-b border-[#1f2945]/30 px-1 py-2 transition-all hover:bg-slate-800/10">
+                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleDisclosureAnalysis(item)}
+                                      className="min-w-0 text-left text-xs text-[#e2e2ec] hover:text-cyan-200"
+                                    >
+                                      <span className="block truncate font-bold">{item.report_nm}</span>
+                                      <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                        <span className="rounded border border-cyan-500/25 bg-cyan-950/25 px-1.5 py-0.5 text-[11px] font-bold text-cyan-200">
+                                          {item.corp_name || 'DART'}
+                                        </span>
+                                        <span className="rounded border border-cyan-500/20 bg-cyan-950/10 px-1.5 py-0.5 text-[11px] font-[550] text-white">
+                                          {formatDisclosureDate(item.rcept_dt)}
+                                        </span>
+                                      </span>
+                                    </button>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleDisclosureAnalysis(item)}
+                                        disabled={isLoadingAnalysis}
+                                        className="rounded border border-cyan-500/30 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-950/30 disabled:cursor-not-allowed disabled:opacity-60"
+                                      >
+                                        {isLoadingAnalysis ? '분석 중' : isOpen ? '접기' : '요약 보기'}
+                                      </button>
+                                      <a
+                                        href={item.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
+                                      >
+                                        원문 열기
+                                      </a>
+                                    </div>
+                                  </div>
+                                  {isOpen ? (
+                                    <div className="rounded border border-cyan-500/20 bg-cyan-950/20 px-3 py-2 text-[11px] leading-5 text-slate-300">
+                                      {isLoadingAnalysis && !analysis ? (
+                                        <p className="text-cyan-300">DART 상세 공시를 확인하는 중입니다...</p>
+                                      ) : analysis ? (
+                                        <div className="space-y-2">
+                                          <div className="flex flex-wrap items-center gap-1.5">
+                                            <span className={`rounded border px-2 py-0.5 text-[11px] font-bold ${getDisclosureToneClass(analysis.sentiment)}`}>
+                                              {analysis.sentiment_label || '정보'}
+                                            </span>
+                                            <span className="rounded border border-slate-600/60 bg-slate-900/50 px-2 py-0.5 text-[10px] font-medium text-slate-200">
+                                              신뢰도 {analysis.confidence === 'high' ? '높음' : analysis.confidence === 'medium' ? '보통' : '낮음'}
+                                            </span>
+                                            <span className="text-[10px] text-slate-500">
+                                              {analysis.analysis_source === 'OPENDART_DOCUMENT' ? 'DART 상세 기반' : '제목 기반'}
+                                            </span>
+                                          </div>
+                                          <p className="font-bold text-slate-100">{analysis.headline}</p>
+                                          {analysis.plain_summary ? (
+                                            <p className="rounded border border-[#1f2945]/60 bg-slate-950/30 px-2 py-1.5 text-[11px] leading-5 text-slate-200">
+                                              {analysis.plain_summary}
+                                            </p>
+                                          ) : null}
+                                          {metrics.length > 0 ? (
+                                            <div className="grid gap-1 sm:grid-cols-2">
+                                              {metrics.slice(0, 4).map((metric, index) => (
+                                                <div key={`${metric.label}-${index}`} className="rounded border border-[#1f2945]/60 bg-slate-950/30 px-2 py-1">
+                                                  <span className="text-cyan-200">{metric.label}</span>
+                                                  <span className="mx-1 text-slate-600">·</span>
+                                                  <span className="text-white">{String(metric.value || '').length > 28 ? `${String(metric.value).slice(0, 28)}...` : metric.value}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                          {visibleCheckItems.length > 0 ? (
+                                            <div className="grid gap-1 sm:grid-cols-2">
+                                              {visibleCheckItems.slice(0, 3).map((check, index) => (
+                                                <div key={`${check.question}-${index}`} className="rounded border border-[#1f2945]/60 bg-[#07111f]/70 px-2 py-1">
+                                                  <span className="text-cyan-200">{check.question}</span>
+                                                  <span className="mx-1 text-slate-600">·</span>
+                                                  <span className="text-slate-100">{String(check.answer || '').length > 24 ? `${String(check.answer).slice(0, 24)}...` : check.answer}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                          {risks.length > 0 ? (
+                                            <p className="text-amber-200/90">확인 포인트: {risks[0]}</p>
+                                          ) : null}
+                                        </div>
+                                      ) : (
+                                        <p>{item.summary || item.report_nm || '저장된 요약이 없습니다.'}</p>
+                                      )}
+                                    </div>
+                                  ) : null}
                                 </div>
-                              </div>
-                              {selectedDisclosureId === item.id ? (
-                                <p className="rounded border border-cyan-500/20 bg-cyan-950/20 px-3 py-2 text-[11px] leading-5 text-slate-300">
-                                  {item.summary || item.report_nm || '저장된 요약이 없습니다.'}
-                                </p>
-                              ) : null}
-                            </div>
-                          ))}
+                              )
+                          })}
                         </>
                       ) : (
                         <div className="flex flex-col items-center gap-3 py-8 text-center">
@@ -3169,7 +3408,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   </div>
                   <div className="flex justify-between border-b border-amber-400/20 py-1">
                     <span className="text-slate-300">추정 수량</span>
-                    <span className="font-bold text-white">{dbEstimatedHolding.estimatedQty.toLocaleString()} 주</span>
+                    <span className="font-bold text-white">
+                      {dbEstimatedHolding.estimatedQty.toLocaleString()} {getEstimatedHoldingUnit(dbEstimatedHolding)}
+                    </span>
                   </div>
                   <div className="flex justify-between border-b border-amber-400/20 py-1">
                     <span className="text-slate-300">기록 계좌</span>
@@ -3178,11 +3419,14 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   {dbEstimatedHolding.avgPrice > 0 ? (
                     <div className="flex justify-between border-b border-amber-400/20 py-1">
                       <span className="text-slate-300">추정 평균가</span>
-                      <span className="font-bold text-white">₩{dbEstimatedHolding.avgPrice.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                      <span className="font-bold text-white">
+                        {getEstimatedHoldingCurrencySign(dbEstimatedHolding)}
+                        {dbEstimatedHolding.avgPrice.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}
+                      </span>
                     </div>
                   ) : null}
                   <p className="leading-relaxed text-amber-200">
-                    거래내역에는 체결 매수 기록이 있지만, 현재 선택 계좌의 실제 잔고 API에서는 확인되지 않았습니다. 매도 주문은 실제 KIS 잔고에 수량이 있어야 성공합니다.
+                    {getEstimatedHoldingNotice(dbEstimatedHolding)}
                   </p>
                 </div>
               ) : balanceMessage ? (

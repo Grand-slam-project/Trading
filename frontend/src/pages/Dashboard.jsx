@@ -928,6 +928,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
         <SidebarNav
           activeTab={activeTab}
           isOpen={isSidebarOpen}
+          isLoggedIn={isLoggedIn}
           onClose={() => setIsSidebarOpen(false)}
           onOpen={() => setIsSidebarOpen(true)}
           onTabChange={setActiveTab}
@@ -1332,7 +1333,18 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
           ) : null}
 
           {activeTab === 'watchlist' && <WatchlistTab displayCurrency={displayCurrency} exchangeRate={balance?.exchange_rate} />}
-          {activeTab === 'assets' && <AssetsTab balance={balance} allocation={allocation} displayCurrency={displayCurrency} exchangeRate={balance?.exchange_rate} showMockAssets={showMockAssets} />}
+          {activeTab === 'assets' && (
+            <AssetsTab
+              balance={balance}
+              allocation={allocation}
+              accountBalances={rawBalances}
+              displayCurrency={displayCurrency}
+              exchangeRate={balance?.exchange_rate}
+              showMockAssets={showMockAssets}
+              setShowMockAssets={setShowMockAssets}
+              balanceLoading={balanceLoading}
+            />
+          )}
           {activeTab === 'history' && <TradeHistoryTab />}
           {activeTab === 'admin' && (
             <AdminMlData
