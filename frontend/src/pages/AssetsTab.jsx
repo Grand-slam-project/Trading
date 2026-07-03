@@ -1,14 +1,22 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../supabaseClient'
-import { ASSET_ACCOUNTS_MOCK, FALLBACK_HOLDINGS } from '../dashboardConstants.js'
 import { Rate, SectionHeader } from '../components/DashboardComponents.jsx'
 import { getApiErrorMessage } from '../lib/apiError.js'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050'
 const TAG_REQUIRED_SYMBOLS = new Set(['XRP', 'XLM', 'EOS'])
 
-export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW', exchangeRate = 1500, showMockAssets = true }) {
+export default function AssetsTab({
+  balance,
+  allocation,
+  accountBalances = [],
+  displayCurrency = 'KRW',
+  exchangeRate = 1500,
+  showMockAssets = true,
+  setShowMockAssets,
+  balanceLoading = false,
+}) {
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' })
   const [withdrawAsset, setWithdrawAsset] = useState(null)
   const [withdrawForm, setWithdrawForm] = useState({
@@ -30,6 +38,152 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
     const text = String(val || '')
     const num = parseFloat(text.replace(/[^0-9.-]/g, ''))
     return Number.isFinite(num) ? num : 0
+  }
+
+  const formatNativeCurrency = (value, currency) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return '-'
+    const normalizedCurrency = String(currency || 'KRW').toUpperCase()
+    if (normalizedCurrency === 'USD' || normalizedCurrency === 'USDT') {
+      return `$${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    }
+    if (normalizedCurrency === 'KRW') {
+      return `₩${Math.round(numeric).toLocaleString()}`
+    }
+    return `${numeric.toLocaleString()} ${normalizedCurrency}`
+  }
+
+  const getBalanceCashEntries = (account = {}) => {
+    const fallbackCurrency = String(account.available_cash_currency || account.currency || 'KRW').toUpperCase()
+    const components = Array.isArray(account.available_cash_details?.components)
+      ? account.available_cash_details.components
+      : []
+
+    if (components.length > 0) {
+      return components
+        .map((component) => {
+          const amount = Number(component?.cash_buying_power)
+          if (!Number.isFinite(amount)) return null
+          return {
+            currency: String(component?.currency || fallbackCurrency).toUpperCase(),
+            amount,
+          }
+        })
+        .filter(Boolean)
+    }
+
+    const fallbackAmount = Number(account.available_cash)
+    if (!Number.isFinite(fallbackAmount)) return []
+    return [{ currency: fallbackCurrency, amount: fallbackAmount }]
+  }
+
+  const buildAccountSummaryCards = () => {
+    const normalizedAccounts = (accountBalances || [])
+      .filter(Boolean)
+      .filter((account) => showMockAssets || String(account.env || '').toUpperCase() !== 'MOCK')
+
+    const cardMap = new Map([
+      ['domestic-stock', {
+        id: 'domestic-stock',
+        title: '국내 주식 계좌',
+        accountType: '원화',
+        balanceLabel: '원화 잔고',
+        currency: 'KRW',
+        amount: 0,
+        sources: new Set(),
+      }],
+      ['overseas-stock', {
+        id: 'overseas-stock',
+        title: '해외 주식 계좌',
+        accountType: '달러',
+        balanceLabel: '달러 잔고',
+        currency: 'USD',
+        amount: 0,
+        sources: new Set(),
+      }],
+      ['coinone-crypto', {
+        id: 'coinone-crypto',
+        title: '코인 계좌',
+        accountType: '원화',
+        balanceLabel: '원화 잔고',
+        currency: 'KRW',
+        amount: 0,
+        sources: new Set(),
+      }],
+      ['binance-crypto', {
+        id: 'binance-crypto',
+        title: '코인 계좌',
+        accountType: '달러',
+        balanceLabel: '달러 잔고',
+        currency: 'USD',
+        amount: 0,
+        sources: new Set(),
+      }],
+    ])
+
+    const addSource = (cardId, source) => {
+      const card = cardMap.get(cardId)
+      if (!card || !source) return
+      card.sources.add(source)
+    }
+
+    const addAmount = (cardId, amount, source) => {
+      const card = cardMap.get(cardId)
+      const numeric = Number(amount)
+      if (!card || !Number.isFinite(numeric)) return
+      card.amount += numeric
+      if (source) card.sources.add(source)
+    }
+
+    normalizedAccounts.forEach((account) => {
+      const exchange = String(account.raw_exchange || account.exchange || '').toUpperCase()
+      const sourceLabel = `${exchange}${account.env ? ` ${account.env}` : ''}`
+      const cashEntries = getBalanceCashEntries(account)
+
+      if (['TOSS', 'KIS'].includes(exchange)) {
+        addSource('domestic-stock', sourceLabel)
+        addSource('overseas-stock', sourceLabel)
+      } else if (exchange === 'COINONE') {
+        addSource('coinone-crypto', sourceLabel)
+      } else if (exchange === 'BINANCE' || exchange === 'BINANCE_UM_FUTURES') {
+        addSource('binance-crypto', sourceLabel)
+      }
+
+      cashEntries.forEach((entry) => {
+        const currency = String(entry.currency || '').toUpperCase()
+        if (['TOSS', 'KIS'].includes(exchange)) {
+          if (currency === 'KRW') addAmount('domestic-stock', entry.amount, sourceLabel)
+          if (currency === 'USD' || currency === 'USDT') addAmount('overseas-stock', entry.amount, sourceLabel)
+        } else if (exchange === 'COINONE') {
+          if (currency === 'KRW') addAmount('coinone-crypto', entry.amount, sourceLabel)
+        } else if (exchange === 'BINANCE' || exchange === 'BINANCE_UM_FUTURES') {
+          if (currency === 'USD' || currency === 'USDT') addAmount('binance-crypto', entry.amount, sourceLabel)
+        }
+      })
+
+      ;(account.holdings || []).forEach((holding) => {
+        const holdingCurrency = String(holding.currency || account.currency || '').toUpperCase()
+        const evalAmount = parseNumeric(holding.eval_amount) || Math.abs(parseNumeric(holding.qty)) * parseNumeric(holding.current_price)
+        if (evalAmount <= 0) return
+
+        if (['TOSS', 'KIS'].includes(exchange)) {
+          if (holdingCurrency === 'USD' || holdingCurrency === 'USDT') addAmount('overseas-stock', evalAmount, sourceLabel)
+          else addAmount('domestic-stock', evalAmount, sourceLabel)
+        } else if (exchange === 'COINONE') {
+          addAmount('coinone-crypto', evalAmount, sourceLabel)
+        } else if (exchange === 'BINANCE' || exchange === 'BINANCE_UM_FUTURES') {
+          addAmount('binance-crypto', evalAmount, sourceLabel)
+        }
+      })
+    })
+
+    return Array.from(cardMap.values())
+      .map((card) => ({
+        ...card,
+        balance: formatNativeCurrency(card.amount, card.currency),
+        sourceText: Array.from(card.sources).join(' · '),
+      }))
+      .filter((card) => card.sources.size > 0)
   }
 
   const handleSort = (key) => {
@@ -266,42 +420,7 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
     return `₩${val.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })}`
   }
 
-  const displayAccounts = ASSET_ACCOUNTS_MOCK.map((account) => {
-    let val = parseFloat(account.balance.replace(/[^0-9.-]/g, '')) || 0
-    let currency = account.accountType === '달러' ? 'USD' : 'KRW'
-
-    if (balance) {
-      if (account.id === 'krw-stock') {
-        if (balance.currency !== 'USD') {
-          val = balance.available_cash ?? null
-          currency = balance.currency || 'KRW'
-        }
-      } else if (account.id === 'usd-stock') {
-        if (balance.currency === 'USD') {
-          val = balance.available_cash ?? null
-          currency = 'USD'
-        }
-      } else if (account.id === 'coin-wallet') {
-        const cryptoHoldings = (balance.holdings || []).filter(h => ['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(String(h.raw_exchange || h.exchange || '').toUpperCase()))
-        const cryptoEval = cryptoHoldings.reduce((sum, h) => {
-          const evalAmount = parseNumeric(h.eval_amount)
-          if (evalAmount > 0) return sum + evalAmount
-          return sum + (Math.abs(parseNumeric(h.qty)) * parseNumeric(h.current_price))
-        }, 0)
-        // available_cash_breakdown에서 KRW 또는 USDT 등 가상자산에 묶인 현금자산 추출
-        const krwCash = parseNumeric(balance.available_cash_breakdown?.KRW)
-        const usdtCash = parseNumeric(balance.available_cash_breakdown?.USDT)
-        const rate = Number(exchangeRate) || 1500
-        val = cryptoEval + krwCash + (usdtCash * rate)
-        currency = 'KRW'
-      }
-    }
-
-    return {
-      ...account,
-      balance: val === null ? '-' : formatCurrency(val, currency),
-    }
-  })
+  const displayAccounts = buildAccountSummaryCards()
   const rawHoldings = balance?.holdings?.length
     ? balance.holdings.map((stock, index) => {
       const exchangeName = stock.exchange || stock.account_type || '-'
@@ -326,26 +445,7 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
         returnRate: `${profitRate >= 0 ? '+' : ''}${Number.isFinite(profitRate) ? profitRate.toFixed(2) : '0.00'}%`,
       }
     })
-    : FALLBACK_HOLDINGS.map((stock) => {
-      const isCoin = stock.account.includes('코인')
-      const isForeign = ((/[a-zA-Z]/.test(stock.id || stock.symbol || '') && !/^[0-9a-zA-Z]{6,7}$/.test(stock.id || stock.symbol || '')) || stock.account.includes('해외')) && !isCoin
-      const stockCurrency = isForeign ? 'USD' : 'KRW'
-      const rawAvg = parseFloat(stock.average.replace(/[^0-9.-]/g, '')) || 0
-      const currentDisplayCurrency = isForeign ? displayCurrency : 'KRW'
-      const returnRateNum = parseFloat(stock.returnRate.replace(/[^0-9.-]/g, '')) || 0
-      const qtyNum = parseFloat(stock.quantity.replace(/[^0-9.-]/g, '')) || 0
-      const mockProfit = (rawAvg * qtyNum * returnRateNum) / 100
-      const exchangeName = isCoin ? 'COINONE' : (isForeign ? 'TOSS' : 'KIS')
-      return {
-        ...stock,
-        exchange: exchangeName,
-        assetType: isCoin ? 'CRYPTO' : 'STOCK',
-        source: 'MOCK',
-        quantityNumeric: qtyNum,
-        average: formatUnitCurrency(rawAvg, stockCurrency, currentDisplayCurrency),
-        profit: formatCurrency(mockProfit, stockCurrency, currentDisplayCurrency),
-      }
-    }).filter((stock) => showMockAssets || stock.exchange !== 'KIS')
+    : []
 
   const holdings = rawHoldings
 
@@ -355,13 +455,89 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
     let bVal = parseNumeric(b[sortConfig.key])
     return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal
   })
+  const appliedExchangeRate = Number(exchangeRate) || 1500
+  const isLiveExchangeRate = Boolean(exchangeRate) && appliedExchangeRate !== 1500
+  const allocationColorHex = {
+    domestic: '#0047bb',
+    overseas: '#00e0ff',
+    coin: '#f59e0b',
+    cash: '#64748b',
+  }
+  const allocationSegments = allocation.filter((item) => Number(item.value) > 0)
+  const allocationTotal = allocationSegments.reduce((sum, item) => sum + Number(item.value), 0)
+  let allocationGradientCursor = 0
+  const allocationGradient = allocationSegments.length > 0
+    ? `conic-gradient(${allocationSegments.map((item) => {
+      const start = allocationGradientCursor
+      allocationGradientCursor += (Number(item.value) / allocationTotal) * 100
+      return `${allocationColorHex[item.id] || '#64748b'} ${start}% ${allocationGradientCursor}%`
+    }).join(', ')})`
+    : 'conic-gradient(#334155 0% 100%)'
 
   return (
     <main className="max-w-7xl mx-auto flex flex-col gap-6">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(300px,1fr)]">
       <section className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
-        <SectionHeader eyebrow="Private Asset" title="주식계좌 및 계좌번호" />
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-ai-cyan">Private Asset</p>
+            <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <h2 className="text-sm font-bold uppercase tracking-wider text-white">계좌별 자산 요약</h2>
+              {setShowMockAssets ? (
+                <div className="inline-flex w-fit rounded-md border border-slate-700/80 bg-[#0f172a] p-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowMockAssets(true)}
+                    className={`rounded px-3 py-1 text-xs font-bold transition-all ${showMockAssets
+                      ? 'bg-slate-700 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    모의계좌 포함
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowMockAssets(false)}
+                    className={`rounded px-3 py-1 text-xs font-bold transition-all ${!showMockAssets
+                      ? 'bg-slate-700 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    실거래 전용
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 sm:justify-end">
+            <span className={`h-1.5 w-1.5 rounded-full ${isLiveExchangeRate ? 'bg-[#38bdf8] animate-pulse' : 'bg-amber-400'}`} />
+            <span className="font-bold">적용 환율</span>
+            <span className="font-mono font-bold text-white">
+              ₩{appliedExchangeRate.toLocaleString(undefined, { maximumFractionDigits: 1 })}
+            </span>
+            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${
+              isLiveExchangeRate
+                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                : 'border-amber-500/20 bg-amber-500/10 text-amber-400'
+            }`}>
+              {isLiveExchangeRate ? '실시간 API (Live)' : '임시 고정 환율'}
+            </span>
+          </div>
+        </div>
         <div className="grid gap-3">
-          {displayAccounts.map((account) => (
+          {balanceLoading ? (
+            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-center">
+              <div className="flex flex-col items-center justify-center gap-2 py-4 text-slate-400">
+                <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-600 border-t-ai-cyan" />
+                <p className="text-sm font-bold text-slate-300">계좌 자산을 불러오는 중입니다.</p>
+              </div>
+            </div>
+          ) : displayAccounts.length === 0 ? (
+            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-center">
+              <p className="text-sm font-bold text-slate-300">표시할 계좌 자산이 없습니다.</p>
+              <p className="mt-1 text-xs text-slate-500">거래소 API 키를 연결하고 새로 고침하면 계좌별 자산이 표시됩니다.</p>
+            </div>
+          ) : displayAccounts.map((account) => (
             <div key={account.id} className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
@@ -369,7 +545,9 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
                     <p className="font-bold text-white">{account.title}</p>
                     <span className="rounded-md bg-ai-cyan/10 px-2 py-1 text-xs font-bold text-ai-cyan">{account.accountType}</span>
                   </div>
-                  <p className="mt-2 text-sm text-slate-400 font-mono">계좌번호 {account.maskedAccountNumber}</p>
+                  {account.sourceText ? (
+                    <p className="mt-2 text-xs text-slate-500">{account.sourceText}</p>
+                  ) : null}
                 </div>
                 <div className="md:text-right">
                   <p className="text-xs font-bold text-slate-500">{account.balanceLabel}</p>
@@ -383,28 +561,33 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
 
       <section className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
         <SectionHeader title="보유자산 현황 및 자산 배분 상태" />
-        <div className="flex h-4 overflow-hidden rounded-full bg-[#0f172a]">
-          {allocation.map((item) => (
-            <span key={item.id} className={item.color} style={{ width: `${item.value}%` }} />
-          ))}
+        <div className="mt-4 flex justify-center">
+          <div
+            className="flex aspect-square w-full max-w-[220px] items-center justify-center rounded-full border border-slate-700/70 shadow-inner"
+            style={{ background: allocationGradient }}
+          >
+            <div className="flex h-[62%] w-[62%] flex-col items-center justify-center rounded-full border border-slate-800 bg-[#0f172a] text-center">
+              <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Total</span>
+              <span className="font-mono text-lg font-black text-white">100%</span>
+            </div>
+          </div>
         </div>
-        <div className="mt-5 grid gap-3">
+        <div className="mt-5 grid gap-2">
           {allocation.map((item) => (
-            <div key={item.id} className="rounded-lg bg-[#0f172a] p-4">
-              <div className="flex items-center justify-between gap-3">
-                <span className="flex items-center gap-2 text-sm font-bold text-white">
-                  <span className={`h-2 w-2 rounded-full ${item.color}`} />
-                  {item.label}
-                </span>
-                <span className="font-mono font-bold text-slate-300">{item.value}%</span>
-              </div>
-              <div className="mt-3 h-2 rounded-full bg-white/5">
-                <div className={`h-2 rounded-full ${item.color}`} style={{ width: `${item.value}%` }} />
-              </div>
+            <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg bg-[#0f172a] px-3 py-2.5">
+              <span className="flex min-w-0 items-center gap-2 text-xs font-bold text-white">
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: allocationColorHex[item.id] || '#64748b' }}
+                />
+                <span className="truncate">{item.label}</span>
+              </span>
+              <span className="shrink-0 font-mono text-xs font-bold text-slate-300">{item.value}%</span>
             </div>
           ))}
         </div>
       </section>
+      </div>
 
       <section className="bg-slate-surface border border-slate-700/80 rounded-lg overflow-hidden">
         <div className="p-5 pb-2">
@@ -442,7 +625,26 @@ export default function AssetsTab({ balance, allocation, displayCurrency = 'KRW'
               </tr>
             </thead>
             <tbody>
-              {sortedHoldings.map((item) => {
+              {balanceLoading ? (
+                <tr>
+                  <td colSpan="7" className="px-5 py-12 text-center">
+                    <div className="flex flex-col items-center justify-center gap-2 text-slate-400">
+                      <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-600 border-t-ai-cyan" />
+                      <p className="text-sm font-bold text-slate-300">데이터를 불러오는 중입니다.</p>
+                      <p className="text-xs text-slate-500">연결된 계좌의 보유 종목을 확인하고 있습니다.</p>
+                    </div>
+                  </td>
+                </tr>
+              ) : sortedHoldings.length === 0 ? (
+                <tr>
+                  <td colSpan="7" className="px-5 py-12 text-center">
+                    <div className="flex flex-col items-center justify-center gap-2 text-slate-400">
+                      <p className="text-sm font-bold text-slate-300">표시할 보유 종목이 없습니다.</p>
+                      <p className="text-xs text-slate-500">계좌를 연결했거나 새로 고침을 완료하면 실제 보유 종목이 표시됩니다.</p>
+                    </div>
+                  </td>
+                </tr>
+              ) : sortedHoldings.map((item) => {
                 const canWithdraw = String(item.exchange || '').toUpperCase() === 'COINONE'
                   && String(item.assetType || '').toUpperCase() === 'CRYPTO'
                   && item.source === 'LIVE_BALANCE'
