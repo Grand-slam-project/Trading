@@ -44,6 +44,7 @@
          +-- [services/coinone_client.py]                : 코인원 메인 가상자산 클라이언트
          +-- [services/binance_client.py]                : 바이낸스 확장 가상자산 클라이언트
          +-- [services/auto_trading_rule_engine.py]      : 조건감시 자동/반자동 매도 워커
+         +-- [services/open_order_status_sync_service.py]: 전체 사용자 미완료 주문 상태 동기화 워커
          +-- [services/error_message_service.py]         : 사용자 친화 에러 메시지 표준화
          +-- [services/ml_model_service.py]              : ML 모델 정보 조회 및 실험 리포트 기동
          +-- [services/ml_scheduler.py]                  : 백그라운드 스레드 기반 스케줄러 워커

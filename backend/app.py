@@ -24,6 +24,7 @@ from backend.services.kis_market_universe import KISMarketUniverseService
 from backend.services.market_snapshot_scheduler import start_market_snapshot_scheduler
 from backend.services.ml_scheduler import start_dart_ingest_scheduler, start_news_ingest_scheduler, start_ml_automation_scheduler
 from backend.services.auto_trading_rule_engine import start_auto_trading_rule_scheduler
+from backend.services.open_order_status_sync_service import start_open_order_status_sync_scheduler
 
 from backend.routes.home import home_bp
 from backend.routes.keys import keys_bp
@@ -66,6 +67,9 @@ HOME_MARKET_SNAPSHOT_LIMIT = int(os.getenv("HOME_MARKET_SNAPSHOT_LIMIT", "300"))
 HOME_MARKET_SNAPSHOT_WORKERS = int(os.getenv("HOME_MARKET_SNAPSHOT_WORKERS", "2"))
 AUTO_TRADING_RULES_ENABLED = os.getenv("AUTO_TRADING_RULES_ENABLED", "false").lower() == "true"
 AUTO_TRADING_RULES_INTERVAL_SECONDS = int(os.getenv("AUTO_TRADING_RULES_INTERVAL_SECONDS", "30"))
+OPEN_ORDER_STATUS_SYNC_ENABLED = os.getenv("OPEN_ORDER_STATUS_SYNC_ENABLED", "false").lower() == "true"
+OPEN_ORDER_STATUS_SYNC_INTERVAL_SECONDS = int(os.getenv("OPEN_ORDER_STATUS_SYNC_INTERVAL_SECONDS", "60"))
+OPEN_ORDER_STATUS_SYNC_LIMIT = int(os.getenv("OPEN_ORDER_STATUS_SYNC_LIMIT", "100"))
 
 # Flask Config에 값 바인딩
 app.config["KIS_APPKEY"] = KIS_APPKEY
@@ -144,6 +148,11 @@ if is_scheduler_host and SCHEDULER_RUN_IN_GATEWAY:
     start_auto_trading_rule_scheduler(
         enabled=AUTO_TRADING_RULES_ENABLED,
         interval_seconds=AUTO_TRADING_RULES_INTERVAL_SECONDS,
+    )
+    start_open_order_status_sync_scheduler(
+        enabled=OPEN_ORDER_STATUS_SYNC_ENABLED,
+        interval_seconds=OPEN_ORDER_STATUS_SYNC_INTERVAL_SECONDS,
+        limit=OPEN_ORDER_STATUS_SYNC_LIMIT,
     )
 if __name__ == "__main__":
     # Flask 서버 구동 (python backend/app.py 로 기동할 때만 타며, flask run 시에는 타지 않음)

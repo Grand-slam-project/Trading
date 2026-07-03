@@ -68,7 +68,6 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
     secret_key: '',
     broker_env: 'REAL'
   })
-  const [binanceMarketType, setBinanceMarketType] = useState('SPOT') // SPOT | UM_FUTURES
 
   //
   // 투자성향분석결과 (나중에 DB 연결하면 하드코딩 제거)
@@ -149,8 +148,7 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
       return
     }
 
-    const testExchange = exchange === 'BINANCE' && binanceMarketType === 'UM_FUTURES' ? 'BINANCE_UM_FUTURES' : exchange
-    let payload = { exchange: testExchange }
+    let payload = { exchange }
     if (exchange === 'TOSS') {
       payload = {
         ...payload,
@@ -247,8 +245,7 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
     }
 
     let payload = { exchange }
-    const saveTestExchange = exchange === 'BINANCE' && binanceMarketType === 'UM_FUTURES' ? 'BINANCE_UM_FUTURES' : exchange
-    let testPayload = { exchange: saveTestExchange }
+    let testPayload = { exchange }
 
     if (exchange === 'TOSS') {
       if (!tossForm.client_id || !tossForm.client_secret) {
@@ -325,7 +322,7 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
         broker_env: binanceForm.broker_env
       }
       testPayload = {
-        exchange: saveTestExchange,
+        exchange,
         api_key: binanceForm.api_key,
         secret_key: binanceForm.secret_key,
         broker_env: binanceForm.broker_env
@@ -814,33 +811,6 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
             <div className="flex flex-col gap-4">
               <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-800 bg-[#0F172A]/60 p-1">
                 {[
-                  { key: 'SPOT', label: '현물 Spot', desc: '현물 잔고/주문' },
-                  { key: 'UM_FUTURES', label: 'USD-M 선물', desc: '같은 바이낸스 키 사용' },
-                ].map((item) => (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => {
-                      setBinanceMarketType(item.key)
-                      setBinanceForm(prev => ({
-                        ...prev,
-                        broker_env: item.key === 'UM_FUTURES' ? 'MOCK' : prev.broker_env,
-                      }))
-                    }}
-                    className={`rounded px-3 py-2 text-left transition-all ${
-                      binanceMarketType === item.key
-                        ? 'border border-ai-cyan bg-ai-cyan/10 text-white'
-                        : 'border border-transparent text-slate-400 hover:bg-slate-800/60 hover:text-white'
-                    }`}
-                  >
-                    <div className="text-xs font-extrabold">{item.label}</div>
-                    <div className="mt-0.5 text-[10px] text-slate-500">{item.desc}</div>
-                  </button>
-                ))}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-800 bg-[#0F172A]/60 p-1">
-                {[
                   { key: 'REAL', label: '실거래 REAL', desc: '실제 바이낸스 계정' },
                   { key: 'MOCK', label: '모의 MOCK', desc: 'Binance Demo API' },
                 ].map((item) => (
@@ -862,11 +832,11 @@ export default function Settings({ isLoggedIn, userEmail, handleLogout, userProf
 
               {binanceForm.broker_env === 'MOCK' ? (
                 <div className="rounded border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[11px] leading-5 text-emerald-100">
-                  MOCK은 바이낸스 모의 환경 키를 저장합니다. 현물/선물 선택은 저장 슬롯을 나누지 않고 연결 테스트에 사용할 엔드포인트만 바꿉니다.
+                  모의 MOCK은 바이낸스 테스트넷/데모 환경 키를 저장합니다. 현물/선물 모두 동일한 데모 키를 재사용하여 모의 투자를 수행합니다.
                 </div>
               ) : (
                 <div className="rounded border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] leading-5 text-amber-100">
-                  실거래 키는 실제 바이낸스 계정에 연결됩니다. 출금 주소 조회와 입금 추적은 이 REAL 키만 사용합니다.
+                  실거래 키는 실제 바이낸스 계정에 연결됩니다. 현물 잔고/주문 및 USD-M 선물 거래에 공통으로 사용되며, 출금 주소 조회와 입금 추적 역시 이 REAL 키를 사용합니다.
                 </div>
               )}
 

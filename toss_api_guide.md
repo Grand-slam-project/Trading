@@ -88,6 +88,19 @@
   * `sharesOutstanding` (BigDecimal): 발행주식수
   * `koreanMarketDetail` (KrMarketDetail): 국내 종목일 경우 국내시장 상세 데이터 (해외주식은 null)
 
+### 5) 장 운영 캘린더 조회 (`GET /api/v1/market-calendar/{country}`)
+* **설명:** 지정한 국가(`KR` 또는 `US`)의 당일 장 운영 일정(영업일 여부 및 세션별 상세 운영 시각)을 조회합니다.
+* **파라미터:** `country` (경로 파라미터, `KR` 또는 `US`)
+* **응답 모델 (`MarketCalendar`):**
+  * `today` (Object): 당일 장 운영 정보 (휴장일인 경우 필드가 비어있거나 null)
+    * `date` (String): 기준 일자 (`YYYY-MM-DD`)
+    * `integrated` (Object): 통합 장 운영 세션 정보
+      * `preMarket` / `regularMarket` / `afterMarket` (Object): 각 장 세션 상세 (장전대체거래, 정규장, 장후대체거래)
+        * `startTime` (String): ISO 8601 형식의 세션 시작 시각 (예: `2026-07-03T08:00:00.000+09:00`)
+        * `endTime` (String): ISO 8601 형식의 세션 종료 시각 (예: `2026-07-03T09:00:00.000+09:00`)
+  * `previousBusinessDay` (Object): 직전 영업일 정보 (구조 동일)
+  * `nextBusinessDay` (Object): 차기 영업일 정보 (구조 동일)
+
 ---
 
 ## 4. 계좌 및 보유 자산 API 명세

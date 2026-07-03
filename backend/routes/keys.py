@@ -67,7 +67,8 @@ def get_keys_status():
                 "broker_env": broker_env,
                 "toss_account_no": toss_acc,
                 "toss_account_seq": record.get("toss_account_seq"),
-                "kis_account_no": kis_acc
+                "kis_account_no": kis_acc,
+                "api_permissions": record.get("api_permissions") or {}
             }
 
             result[ex]["registered"] = True
@@ -151,6 +152,14 @@ def save_api_keys():
 
             db_data["encrypted_access_key"] = crypto_helper.encrypt(api_key)
             db_data["encrypted_secret_key"] = crypto_helper.encrypt(secret_key)
+
+            # API Key 유효성 및 권한 검증
+            try:
+                spot_client = BinanceClient(api_key=api_key, secret_key=secret_key, env=broker_env)
+                perms = spot_client.get_api_permissions()
+                db_data["api_permissions"] = perms
+            except Exception as e:
+                return jsonify(format_error_payload(e, "바이낸스 API 연결 및 권한 검증에 실패했습니다. 키 설정을 다시 확인하세요.", exchange=exchange)), 400
 
         upsert_user_api_key(auth_header, db_data)
         return jsonify({"success": True, "message": f"{storage_exchange} API Key가 안전하게 저장되었습니다."})
@@ -280,13 +289,63 @@ def test_keys():
             client.get_balance()
             message = "코인원 API 연결에 성공했습니다."
         elif exchange == "BINANCE":
-            client = BinanceClient(api_key=client_id, secret_key=client_secret, env=broker_env)
-            client.get_balance()
-            message = f"바이낸스 API 연결에 성공했습니다. ({broker_env})"
+            # 1. 현물 연결 검증
+            spot_client = BinanceClient(api_key=client_id, secret_key=client_secret, env=broker_env)
+            spot_client.get_balance()
+            
+            # 2. USD-M 선물 연결 검증
+            futures_client = BinanceFuturesClient(api_key=client_id, secret_key=client_secret, env=broker_env)
+            futures_client.get_balance()
+
+            # 3. API 권한 검증 및 DB 적재
+            perms = spot_client.get_api_permissions()
+            if auth_header and user_id:
+                try:
+                    upsert_user_api_key(auth_header, {
+                        "exchange": "BINANCE",
+                        "broker_env": broker_env,
+                        "api_permissions": perms
+                    })
+                except Exception as ex:
+                    print("바이낸스 API 권한 DB 업데이트 실패:", ex)
+
+            perm_desc = []
+            if perms.get("spot_trade_enabled"):
+                perm_desc.append("현물 거래 가능")
+            if perms.get("futures_trade_enabled"):
+                perm_desc.append("선물 거래 가능")
+            if perms.get("read_only"):
+                perm_desc.append("읽기 전용")
+
+            perm_str = f" [권한: {', '.join(perm_desc)}]" if perm_desc else " [권한 없음]"
+            message = f"바이낸스 현물 및 USD-M 선물 API 연결에 성공했습니다. ({broker_env}){perm_str}"
         elif exchange == "BINANCE_UM_FUTURES":
             client = BinanceFuturesClient(api_key=client_id, secret_key=client_secret, env=broker_env)
             client.get_balance()
-            message = f"바이낸스 USD-M 선물 API 연결에 성공했습니다. ({broker_env})"
+
+            # 2. API 권한 검증 및 DB 적재
+            spot_client = BinanceClient(api_key=client_id, secret_key=client_secret, env=broker_env)
+            perms = spot_client.get_api_permissions()
+            if auth_header and user_id:
+                try:
+                    upsert_user_api_key(auth_header, {
+                        "exchange": "BINANCE",
+                        "broker_env": broker_env,
+                        "api_permissions": perms
+                    })
+                except Exception as ex:
+                    print("바이낸스 선물 API 권한 DB 업데이트 실패:", ex)
+
+            perm_desc = []
+            if perms.get("spot_trade_enabled"):
+                perm_desc.append("현물 거래 가능")
+            if perms.get("futures_trade_enabled"):
+                perm_desc.append("선물 거래 가능")
+            if perms.get("read_only"):
+                perm_desc.append("읽기 전용")
+
+            perm_str = f" [권한: {', '.join(perm_desc)}]" if perm_desc else " [권한 없음]"
+            message = f"바이낸스 USD-M 선물 API 연결에 성공했습니다. ({broker_env}){perm_str}"
         else:
             return jsonify({"success": False, "message": f"지원하지 않는 브로커: {exchange}"}), 400
 

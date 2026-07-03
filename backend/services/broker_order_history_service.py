@@ -20,6 +20,20 @@ def _is_broker_order_history_missing_error(error) -> bool:
     return "broker_order_history" in message and ("404" in message or "not found" in message or "could not find" in message)
 
 
+def _is_broker_order_history_schema_error(error) -> bool:
+    """
+    원격 DB 스키마가 최신 마이그레이션과 다를 때 조회 폴백이 필요한지 판단합니다.
+    """
+    message = str(error or "").lower()
+    return "broker_order_history" in message and (
+        "400" in message
+        or "pgrst204" in message
+        or "schema cache" in message
+        or "could not find" in message
+        or "ordered_at" in message
+    )
+
+
 def _normalize_timestamp(value):
     """
     다양한 시각 표현을 UTC ISO 문자열로 정규화합니다.
@@ -329,4 +343,8 @@ def list_broker_order_history(auth_header, limit=300, exchange=None, broker_env=
     except Exception as error:
         if _is_broker_order_history_missing_error(error):
             return []
+        if _is_broker_order_history_schema_error(error):
+            fallback_params = dict(params)
+            fallback_params["order"] = "created_at.desc"
+            return query_supabase_as_service_role("broker_order_history", "GET", params=fallback_params) or []
         raise

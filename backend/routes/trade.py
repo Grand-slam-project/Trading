@@ -49,6 +49,10 @@ def determine_market_country(symbol: str) -> str:
 
 
 def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
+    is_us_stock = any(c.isalpha() for c in symbol)
+    if is_us_stock and exchange == "KIS":
+        exchange = "TOSS"
+
     cache_key = (exchange, symbol, broker_env)
     now = time.time()
     if cache_key in PRICE_CHANGE_CACHE:
@@ -71,11 +75,14 @@ def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
                     price_data = client.get_price(symbol)
                     change_rate = float(price_data.get("change_rate") or 0.0)
                 except Exception as toss_err:
-                    current_app.logger.warning(f"TOSS get_price failed in get_cached_change_rate: {str(toss_err)}. KIS 폴백을 시도합니다.")
+                    if not is_us_stock:
+                        current_app.logger.warning(f"TOSS get_price failed in get_cached_change_rate: {str(toss_err)}. KIS 폴백을 시도합니다.")
+                    else:
+                        current_app.logger.warning(f"TOSS get_price failed for US stock in get_cached_change_rate: {str(toss_err)}.")
                     records = []
             
-            # TOSS 키가 없거나 호출이 실패한 경우 KIS 키로 폴백하여 시세 및 전일대비율을 구합니다.
-            if not records:
+            # TOSS 키가 없거나 호출이 실패한 경우 KIS 키로 폴백하여 시세 및 전일대비율을 구합니다 (해외주식 제외).
+            if not records and not is_us_stock:
                 records_kis = _get_quote_records_with_env_fallback(auth_header, user_id, "KIS", broker_env)
                 if records_kis:
                     access_key = crypto_helper.decrypt(records_kis[0].get("encrypted_access_key"))
@@ -88,6 +95,8 @@ def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
                     change_rate = float(price_data.get("change_rate") or 0.0)
 
         elif exchange == "KIS" and auth_header:
+            if is_us_stock:
+                raise Exception("해외 주식 시세는 KIS로 조회할 수 없습니다.")
             user_id, token = get_user_id_from_header(auth_header)
             crypto_helper = current_app.crypto
             records = _get_quote_records_with_env_fallback(auth_header, user_id, "KIS", broker_env)
@@ -150,27 +159,171 @@ def get_cached_change_rate(exchange, symbol, broker_env, auth_header):
 
 from datetime import timedelta, timezone as datetime_timezone
 
-def is_kr_market_open() -> bool:
+def _is_us_regular_market_open(client=None) -> bool:
     """
-    현재 한국 장(KRX)이 열려 있는지 여부를 판단합니다. (평일 09:00 ~ 15:30 KST)
+    현재 미국 정규장(Regular Market)이 열려 있는지 여부를 판단합니다.
     """
-    kst_now = datetime.now(datetime_timezone(timedelta(hours=9)))
-    if kst_now.weekday() >= 5:
-        return False
-    start_time = kst_now.replace(hour=9, minute=0, second=0, microsecond=0)
-    end_time = kst_now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return start_time <= kst_now <= end_time
-
-def is_us_market_open() -> bool:
-    """
-    현재 미국 주식 시장이 열려 있는지 여부를 판단합니다. (미동부 통합 운영 04:00 ~ 20:00 EST/EDT)
-    """
-    utc_now = datetime.now(datetime_timezone.utc)
-    # 3~10월은 서머타임(EDT = UTC-4), 11~2월은 표준시(EST = UTC-5)로 대략적 추정
+    import datetime
+    
+    utc_now = datetime.datetime.now(datetime_timezone.utc)
     month = utc_now.month
     est_offset = timedelta(hours=-4) if 3 <= month <= 10 else timedelta(hours=-5)
     est_now = utc_now.astimezone(datetime_timezone(est_offset))
     
+    if client and hasattr(client, "get_market_calendar"):
+        try:
+            calendar = client.get_market_calendar("US")
+            today_data = calendar.get("today")
+            if not today_data:
+                return False
+                
+            integrated = today_data.get("integrated") or {}
+            session = integrated.get("regularMarket")
+            if session:
+                start_str = session.get("startTime")
+                end_str = session.get("endTime")
+                if start_str and end_str:
+                    try:
+                        start_dt = datetime.datetime.fromisoformat(start_str)
+                        end_dt = datetime.datetime.fromisoformat(end_str)
+                        current_time = datetime.datetime.now(datetime.timezone.utc)
+                        if start_dt <= current_time <= end_dt:
+                            return True
+                    except Exception:
+                        pass
+            return False
+        except Exception:
+            pass
+            
+    if est_now.weekday() >= 5:
+        return False
+    start_time = est_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    end_time = est_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return start_time <= est_now <= end_time
+
+def is_kr_market_open(client=None, symbol: str = None) -> bool:
+    """
+    현재 한국 장(KRX/NXT)이 열려 있는지 여부를 판단합니다.
+    client와 symbol이 주어지면 토스 장 캘린더 API 및 종목 NXT 지원 여부를 참고하여 정교하게 판단합니다.
+    """
+    import datetime
+    from flask import current_app
+    
+    kst_now = datetime.datetime.now(datetime_timezone(timedelta(hours=9)))
+    
+    # 1. client가 캘린더 조회를 지원하지 않는 경우 보조 공용 토스 클라이언트 빌드
+    calendar_client = client
+    if not calendar_client or not hasattr(calendar_client, "get_market_calendar"):
+        user_id = getattr(client, "user_id", None)
+        env = getattr(client, "env", "REAL")
+        calendar_client = _get_shared_toss_client(user_id=user_id, broker_env=env)
+
+    if calendar_client and hasattr(calendar_client, "get_market_calendar"):
+        try:
+            calendar = calendar_client.get_market_calendar("KR")
+            today_data = calendar.get("today")
+            if not today_data:
+                return False
+                
+            integrated = today_data.get("integrated") or {}
+            if not integrated:
+                return False
+                
+            # 세션별 운영 시간 검증
+            is_nxt_supported = False
+            if symbol and hasattr(calendar_client, "get_stock_info"):
+                try:
+                    stock_info = calendar_client.get_stock_info(symbol)
+                    if stock_info and isinstance(stock_info, dict):
+                        korean_detail = stock_info.get("korean_market_detail") or {}
+                        is_nxt_supported = bool(korean_detail.get("nxt_supported"))
+                except Exception:
+                    pass
+            
+            # 허용할 세션 수집 (정규장은 기본 허용, NXT 지원 시 프리/애프터 대체거래도 허용)
+            allowed_sessions = ["regularMarket"]
+            if is_nxt_supported:
+                allowed_sessions.extend(["preMarket", "afterMarket"])
+                
+            # 현재 시각(KST)이 허용된 세션 범위 내에 있는지 비교
+            for session_key in allowed_sessions:
+                session = integrated.get(session_key)
+                if not session:
+                    continue
+                
+                start_str = session.get("startTime")
+                end_str = session.get("endTime")
+                if start_str and end_str:
+                    try:
+                        # ISO 8601 시간 파싱 (파이썬 3.7+ fromisoformat)
+                        start_dt = datetime.datetime.fromisoformat(start_str)
+                        end_dt = datetime.datetime.fromisoformat(end_str)
+                        
+                        if start_dt <= kst_now <= end_dt:
+                            return True
+                    except Exception as ex:
+                        current_app.logger.error(f"KST ISO 시간 파싱 실패: {start_str}, {end_str} -> {str(ex)}")
+            return False
+        except Exception as e:
+            current_app.logger.warning(f"KR 캘린더 API 조회 실패, 하드코딩 룰로 폴백: {str(e)}")
+            
+    # 2. 폴백: 기본 정규장 및 대체거래소 시간 비교 (평일 08:00 ~ 20:00 KST)
+    if kst_now.weekday() >= 5:
+        return False
+    start_time = kst_now.replace(hour=8, minute=0, second=0, microsecond=0)
+    end_time = kst_now.replace(hour=20, minute=0, second=0, microsecond=0)
+    return start_time <= kst_now <= end_time
+
+def is_us_market_open(client=None) -> bool:
+    """
+    현재 미국 주식 시장이 열려 있는지 여부를 판단합니다. (미동부 통합 운영 04:00 ~ 20:00 EST/EDT)
+    client가 주어지면 토스 장 캘린더 API를 참고하여 정교하게 판단합니다.
+    """
+    import datetime
+    from flask import current_app
+    
+    utc_now = datetime.datetime.now(datetime_timezone.utc)
+    month = utc_now.month
+    est_offset = timedelta(hours=-4) if 3 <= month <= 10 else timedelta(hours=-5)
+    est_now = utc_now.astimezone(datetime_timezone(est_offset))
+    
+    # 1. client가 주어진 경우 토스 캘린더 API 조회
+    if client and hasattr(client, "get_market_calendar"):
+        try:
+            calendar = client.get_market_calendar("US")
+            today_data = calendar.get("today")
+            if not today_data:
+                return False
+                
+            integrated = today_data.get("integrated") or {}
+            if not integrated:
+                return False
+                
+            # 미국은 모든 세션 허용 (프리/정규/애프터)
+            allowed_sessions = ["regularMarket", "preMarket", "afterMarket"]
+            current_time = datetime.datetime.now(datetime.timezone.utc)
+            
+            for session_key in allowed_sessions:
+                session = integrated.get(session_key)
+                if not session:
+                    continue
+                    
+                start_str = session.get("startTime")
+                end_str = session.get("endTime")
+                if start_str and end_str:
+                    try:
+                        start_dt = datetime.datetime.fromisoformat(start_str)
+                        end_dt = datetime.datetime.fromisoformat(end_str)
+                        
+                        if start_dt <= current_time <= end_dt:
+                            return True
+                    except Exception as ex:
+                        current_app.logger.error(f"US ISO 시간 파싱 실패: {start_str}, {end_str} -> {str(ex)}")
+            return False
+        except Exception as e:
+            current_app.logger.warning(f"US 캘린더 API 조회 실패, 하드코딩 룰로 폴백: {str(e)}")
+
+    # 2. 폴백: 기본 통합 운영 시간 비교
     if est_now.weekday() >= 5:
         return False
         
@@ -349,6 +502,71 @@ def _build_exchange_client(exchange: str, broker_env: str, record: dict, access_
             env=broker_env,
         )
     return None
+
+
+def _get_shared_toss_client(user_id=None, broker_env="REAL"):
+    """
+    한투(KIS) 거래 시에도 캘린더 및 종목 정보를 얻기 위해 보조적으로 사용할 수 있는
+    공용 또는 사용자 본인의 TossClient 인스턴스를 빌드하여 반환합니다.
+    """
+    import os
+    from backend.services.toss_client import TossClient
+
+    # 1. 만약 user_id가 주어지고, 해당 유저가 이미 본인의 토스 키를 등록해 둔 상태라면 그것을 우선 사용
+    if user_id:
+        try:
+            from backend.services.supabase_client import query_supabase_as_service_role
+            keys = query_supabase_as_service_role(
+                "user_api_keys",
+                "GET",
+                params={
+                    "user_id": f"eq.{user_id}",
+                    "exchange": "eq.TOSS",
+                    "broker_env": f"eq.{broker_env}"
+                }
+            )
+            if keys and isinstance(keys, list) and len(keys) > 0:
+                record = keys[0]
+                from backend.utils.crypto_helper import CryptoHelper
+                encryption_key = os.getenv("ENCRYPTION_KEY", "default-dev-encryption-key-32bytes!")
+                crypto = CryptoHelper(encryption_key)
+                access_key = crypto.decrypt(record["access_key"])
+                secret_key = crypto.decrypt(record["secret_key"])
+                return TossClient(
+                    client_id=access_key,
+                    client_secret=secret_key,
+                    account_seq=record.get("toss_account_seq"),
+                    env=broker_env,
+                    user_id=user_id
+                )
+        except Exception:
+            pass
+
+    # 2. 백엔드 시스템 환경 변수에 토스 공용 키가 등록되어 있는 경우 사용
+    shared_client_id = os.getenv("SHARED_TOSS_CLIENT_ID") or os.getenv("TOSS_CLIENT_ID")
+    shared_client_secret = os.getenv("SHARED_TOSS_CLIENT_SECRET") or os.getenv("TOSS_CLIENT_SECRET")
+    shared_account_seq = os.getenv("SHARED_TOSS_ACCOUNT_SEQ") or os.getenv("TOSS_ACCOUNT_SEQ")
+    
+    if shared_client_id and shared_client_secret:
+        try:
+            return TossClient(
+                client_id=shared_client_id,
+                client_secret=shared_client_secret,
+                account_seq=shared_account_seq,
+                env=broker_env,
+                user_id="shared_system"
+            )
+        except Exception:
+            pass
+
+    # 3. 최후의 폴백: MOCK 환경의 공용 TossClient를 생성하여 평일 및 세션 시각 판단 데이터를 공용 가이드로 제공
+    return TossClient(
+        client_id="mock_id",
+        client_secret="mock_secret",
+        account_seq="123",
+        env="MOCK",
+        user_id="shared_mock"
+    )
 
 
 def _load_user_trade_proposal(auth_header: str, user_id: str, proposal_id: str) -> dict:
@@ -1056,7 +1274,7 @@ def _build_precheck_payload(
     available_cash = balance_snapshot["available_cash"]
     holding_qty = balance_snapshot["holding_qty"]
 
-    exceeds_hard_cap = broker_env == "REAL" and estimated_amount_krw > REAL_ORDER_LIMIT_KRW
+    exceeds_hard_cap = False
     if exchange == "BINANCE_UM_FUTURES":
         insufficient_cash = (
             broker_env == "REAL"
@@ -1084,9 +1302,66 @@ def _build_precheck_payload(
             and qty > holding_qty
         )
 
+    is_market_closed = False
+    market_status_message = "장 운영 중"
+    if exchange in ("TOSS", "KIS"):
+        market_country = determine_market_country(symbol)
+        if market_country == "US":
+            if not is_us_market_open(client):
+                is_market_closed = True
+                market_status_message = "현재는 미국 주식 장외 시간(또는 휴장일)입니다."
+            elif order_type.upper() == "MARKET" and not _is_us_regular_market_open(client):
+                is_market_closed = True
+                market_status_message = "미국 주식 시장가/금액 주문은 정규장(한국 기준 밤 11시반~새벽 6시)에만 가능합니다."
+        else:
+            if not is_kr_market_open(client, symbol):
+                is_market_closed = True
+                is_nxt_supported = False
+                
+                # 공용/사용자 토스 클라이언트 빌드
+                calendar_client = client
+                if not calendar_client or not hasattr(calendar_client, "get_stock_info"):
+                    user_id = getattr(client, "user_id", None)
+                    env = getattr(client, "env", "REAL")
+                    calendar_client = _get_shared_toss_client(user_id=user_id, broker_env=env)
+                    
+                if calendar_client and hasattr(calendar_client, "get_stock_info"):
+                    try:
+                        stock_info = calendar_client.get_stock_info(symbol)
+                        if stock_info and isinstance(stock_info, dict):
+                            korean_detail = stock_info.get("korean_market_detail") or {}
+                            is_nxt_supported = bool(korean_detail.get("nxt_supported"))
+                    except Exception:
+                        pass
+                
+                if is_nxt_supported:
+                    market_status_message = "현재는 한국 주식 대체거래소(NXT) 장외 시간(20시~익일 08시) 또는 공휴일입니다."
+                else:
+                    market_status_message = "현재는 한국 주식 정규장 장외 시간(15시30분~익일 09시) 또는 공휴일입니다. (NXT 미지원 종목)"
+
     asset_type = "STOCK" if exchange in ("TOSS", "KIS") else "CRYPTO"
     currency = "KRW" if exchange in ("TOSS", "KIS", "COINONE") else "USD"
     warnings = []
+    if is_market_closed:
+        warnings.append(market_status_message)
+
+    insufficient_permission = False
+    permission_message = ""
+    if broker_env == "REAL" and exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
+        api_perms = record.get("api_permissions") or {}
+        # 기존 저장된 키에 api_permissions 컬럼값이 없을 수 있으므로 빈 딕셔너리일 경우 기본 통과시킵니다.
+        if api_perms:
+            if exchange == "BINANCE":
+                if not api_perms.get("spot_trade_enabled", False):
+                    insufficient_permission = True
+                    permission_message = "바이낸스 API Key에 현물 거래(Spot) 권한이 없습니다. 바이낸스 API 설정에서 Enable Spot & Margin Trading을 활성화하세요."
+                    warnings.append("API Key 현물 거래 권한 누락")
+            elif exchange == "BINANCE_UM_FUTURES":
+                if not api_perms.get("futures_trade_enabled", False):
+                    insufficient_permission = True
+                    permission_message = "바이낸스 API Key에 선물 거래(Futures) 권한이 없습니다. 바이낸스 API 설정에서 Enable Futures를 활성화하세요."
+                    warnings.append("API Key 선물 거래 권한 누락")
+
     exchange_order_test = None
     futures_real_blocked = (
         exchange == "BINANCE_UM_FUTURES"
@@ -1095,8 +1370,6 @@ def _build_precheck_payload(
     )
     if futures_real_blocked:
         warnings.append("바이낸스 선물 실거래는 기본 차단되어 있습니다. 모의투자(TESTNET/MOCK)로 먼저 검증하세요.")
-    if exceeds_hard_cap:
-        warnings.append("실거래 1회 주문 한도 10만원을 초과합니다.")
     if insufficient_cash:
         warnings.append("예수금 대비 주문 예정 증거금이 큽니다." if exchange == "BINANCE_UM_FUTURES" else "예수금 대비 주문 예정 금액이 큽니다.")
     if insufficient_holding:
@@ -1130,6 +1403,8 @@ def _build_precheck_payload(
         "real_order_limit_krw": REAL_ORDER_LIMIT_KRW,
         "exceeds_real_order_limit": exceeds_hard_cap,
         "futures_real_blocked": futures_real_blocked,
+        "insufficient_permission": insufficient_permission,
+        "permission_message": permission_message,
         "available_cash": available_cash,
         "holding_qty": holding_qty,
         "holding_value": balance_snapshot["holding_value"],
@@ -1137,6 +1412,8 @@ def _build_precheck_payload(
         "insufficient_holding": insufficient_holding,
         "exchange_order_test": exchange_order_test,
         "warnings": warnings,
+        "is_market_closed": is_market_closed,
+        "market_status_message": market_status_message,
         "checked_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -1233,6 +1510,11 @@ def place_manual_order():
     if exchange not in SUPPORTED_TRADE_EXCHANGES:
         return jsonify({"success": False, "message": "지원하지 않는 거래소입니다."}), 400
 
+    # 해외 주식(미국 주식)은 KIS 주문을 허용하지 않고 오직 TOSS로만 주문할 수 있도록 차단
+    is_us_stock = any(c.isalpha() for c in symbol)
+    if exchange == "KIS" and is_us_stock:
+        return jsonify({"success": False, "message": "해외 주식(미국 주식)은 Toss증권을 통해서만 주문이 가능합니다."}), 400
+
     if action.upper() not in ("BUY", "SELL"):
         return jsonify({"success": False, "message": "올바르지 않은 주문 방향(action)입니다."}), 400
 
@@ -1284,16 +1566,19 @@ def place_manual_order():
     total_amount = precheck["estimated_amount"]
     total_amount_krw = precheck["estimated_amount_krw"]
 
-    if precheck["exceeds_real_order_limit"]:
-        return jsonify({
-            "success": False,
-            "message": f"실거래 1회 주문 한도(100,000원)를 초과할 수 없습니다. (신청 금액: {total_amount_krw:,.0f}원)"
-        }), 400
+    if precheck.get("is_market_closed"):
+        return jsonify({"success": False, "message": precheck.get("market_status_message") or "현재는 거래가 불가능한 시간(또는 휴장일)입니다."}), 400
 
     if precheck.get("futures_real_blocked"):
         return jsonify({
             "success": False,
             "message": "바이낸스 선물 실거래는 현재 잠겨 있습니다. 먼저 MOCK/TESTNET 모의투자로 검증하거나 BINANCE_FUTURES_REAL_ENABLED=true 설정 후 다시 시도하세요."
+        }), 400
+
+    if precheck.get("insufficient_permission"):
+        return jsonify({
+            "success": False,
+            "message": precheck.get("permission_message") or "해당 마켓의 거래 권한이 없습니다."
         }), 400
 
     if precheck["insufficient_cash"]:
@@ -1303,6 +1588,7 @@ def place_manual_order():
         return jsonify({"success": False, "message": "보유 수량을 초과하는 매도 주문입니다."}), 400
 
     # 4. 주문 실행
+    client = None
     try:
         if exchange == "TOSS":
             client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
@@ -2282,6 +2568,11 @@ def get_chart_candles():
 
     if not exchange or not symbol:
         return jsonify({"success": False, "message": "exchange 및 symbol 파라미터가 필수적입니다."}), 400
+
+    # 해외 주식(미국 주식)은 KIS 조회 요청이 오더라도 강제로 TOSS로 우회 처리합니다.
+    is_us_stock = any(c.isalpha() for c in symbol)
+    if is_us_stock and exchange == "KIS":
+        exchange = "TOSS"
 
     auth_header = request.headers.get("Authorization")
     ttl = get_dynamic_ttl(exchange, symbol, interval)
@@ -3264,6 +3555,63 @@ def _fetch_trades_uncached(cache_key, exchange, symbol, broker_env, auth_header)
     })
 
 
+def _auto_backfill_stock_from_turnover(query_symbol: str) -> dict | None:
+    """
+    turnover_latest 테이블을 조회하여 해외주식 등 누락 종목 정보를 확보한 뒤, 
+    kis_stock_master 테이블에 온디맨드로 자동 등록(Backfill)합니다.
+    """
+    from backend.services.supabase_client import safe_query_supabase_as_service_role
+    
+    # 1. turnover_latest 에서 심볼 조회
+    records = safe_query_supabase_as_service_role(
+        "kis_stock_turnover_latest",
+        "GET",
+        params={"symbol": f"eq.{query_symbol.upper()}"}
+    )
+    if not records:
+        return None
+        
+    row = records[0]
+    raw_payload = row.get("raw_payload") or {}
+    
+    # 2. 거래소 코드를 통해 market_segment 판단
+    excd = raw_payload.get("excd") or raw_payload.get("_exchange_code") or ""
+    market_segment = "OTHER"
+    if excd == "NAS":
+        market_segment = "NASDAQ"
+    elif excd == "NYS":
+        market_segment = "NYSE"
+    elif excd == "AMS":
+        market_segment = "AMEX"
+        
+    display_name = row.get("name") or query_symbol.upper()
+    
+    new_stock = {
+        "symbol": query_symbol.upper(),
+        "name": display_name,
+        "display_name": display_name,
+        "sector": "해외주식",
+        "market_segment": market_segment,
+        "market_country": row.get("market_country") or "US",
+        "asset_type": "STOCK",
+        "source": "KIS",
+        "is_active": True
+    }
+    
+    try:
+        # service_role 권한으로 안전하게 insert
+        safe_query_supabase_as_service_role(
+            "kis_stock_master",
+            "POST",
+            json_data=new_stock
+        )
+        return new_stock
+    except Exception as e:
+        from flask import current_app
+        current_app.logger.error(f"Failed to auto-backfill stock {query_symbol}: {e}")
+        return None
+
+
 @trade_bp.route("/api/symbol/lookup", methods=["GET"])
 def lookup_symbol():
     """
@@ -3337,7 +3685,21 @@ def lookup_symbol():
                     "symbol": row["symbol"],
                     "display_name": clean_name,
                     "asset_type": "STOCK",
-                    "market": "KR"
+                    "market": row.get("market_country") or "KR"
+                }
+            })
+
+    # 4. 누락 해외 주식 온디맨드 자동 등록 (Auto-backfill) 시도
+    if re.match(r"^[A-Z0-9]{1,10}$", query):
+        backfilled = _auto_backfill_stock_from_turnover(query)
+        if backfilled:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "symbol": backfilled["symbol"],
+                    "display_name": backfilled["display_name"],
+                    "asset_type": "STOCK",
+                    "market": backfilled["market_country"]
                 }
             })
 
@@ -3445,8 +3807,30 @@ def search_symbols():
                 "symbol": sym,
                 "display_name": clean_name,
                 "asset_type": "STOCK",
-                "market": "KR"
+                "market": row.get("market_country") or "KR"
             })
+
+    # 4. turnover_latest 추가 검색 (해외 랭킹에만 존재하는 종목 대응)
+    from backend.services.supabase_client import safe_query_supabase_as_service_role
+    turnover_results = safe_query_supabase_as_service_role(
+        "kis_stock_turnover_latest",
+        "GET",
+        params={
+            "or": f"(name.ilike.*{query}*,symbol.ilike.*{query}*)",
+            "limit": 10
+        }
+    )
+    if turnover_results:
+        for row in turnover_results:
+            sym = row["symbol"]
+            if sym not in seen:
+                seen.add(sym)
+                results.append({
+                    "symbol": sym,
+                    "display_name": row.get("name") or sym,
+                    "asset_type": "STOCK",
+                    "market": row.get("market_country") or "US"
+                })
 
     # 가독성을 위해 코드 길이 순 및 사전 순 정렬
     results.sort(key=lambda x: (len(x["symbol"]), x["display_name"]))

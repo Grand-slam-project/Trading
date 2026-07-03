@@ -68,12 +68,63 @@ class KISClient(ExchangeClient):
             self.buy_tr_id = "TTTC0802U"
             self.sell_tr_id = "TTTC0801U"
             self.modify_cancel_tr_id = "TTTC0803U"
+            self.overseas_balance_tr_id = "TTTS3012R"
+            self.overseas_buy_tr_id = "TTTT1002U"
+            self.overseas_sell_tr_id = "TTTT1006U"
         else:
             self.base_url = "https://openapivts.koreainvestment.com:29443"
             self.balance_tr_id = "VTTC8434R"
             self.buy_tr_id = "VTTC0802U"
             self.sell_tr_id = "VTTC0801U"
             self.modify_cancel_tr_id = "VTTC0803U"
+            self.overseas_balance_tr_id = "VTRT3012R"
+            self.overseas_buy_tr_id = "VTTT3001U"
+            self.overseas_sell_tr_id = "VTTT3002U"
+
+    def _get_overseas_excg_codes(self, symbol: str) -> tuple[str, str]:
+        """
+        미국 주식에 대해 (주문용_4자리_코드, 시세용_3자리_코드)를 반환합니다.
+        """
+        from backend.services.market_repository import MarketRepository
+        repo = MarketRepository()
+        excg_4 = "NASD"
+        excg_3 = "NAS"
+        
+        if repo.is_configured:
+            try:
+                infos = repo.list_symbols([symbol])
+                if infos:
+                    segment = str(infos[0].get("market_segment", "")).upper()
+                    if "NASDAQ" in segment:
+                        excg_4 = "NASD"
+                        excg_3 = "NAS"
+                    elif "NYSE" in segment:
+                        excg_4 = "NYSE"
+                        excg_3 = "NYS"
+                    elif "AMEX" in segment:
+                        excg_4 = "AMEX"
+                        excg_3 = "AMS"
+            except Exception:
+                pass
+        return excg_4, excg_3
+
+    def _get_hashkey(self, payload: dict) -> str:
+        """
+        POST 요청 시 보디(payload)의 해시값을 획득합니다.
+        """
+        url = f"{self.base_url}/uapi/hashkey"
+        headers = {
+            "content-type": "application/json",
+            "appkey": self.appkey,
+            "appsecret": self.appsecret
+        }
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=10)
+            if res.status_code == 200:
+                return res.json().get("HASH", "")
+        except Exception as e:
+            logger.warning(f"[KIS Client] Failed to get hashkey: {e}")
+        return ""
 
     def _clear_token_cache(self):
         """
@@ -312,34 +363,40 @@ class KISClient(ExchangeClient):
 
     def get_price(self, symbol: str) -> dict:
         _enforce_kis_mock_rate_limit(self.env)
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-            "tr_id": "FHKST01010100"
-        }
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": symbol
-        }
-        res = self._request_with_token_retry("GET", url, headers, params=params, timeout=10)
-        if res.status_code != 200:
-            raise Exception(f"KIS get_price failed: {res.text}")
-            
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            raise Exception(f"KIS get_price error: {data.get('msg1')}")
-            
-        output = data.get("output", {})
-        try:
-            current_price = float(output.get("stck_prpr", 0))
-            change_rate = float(output.get("prdy_ctrt", 0))
-            trading_volume = float(output.get("acml_vol", 0))
-            trading_value = float(output.get("acml_tr_pbmn", 0))
-        except (ValueError, TypeError):
-            current_price = 0.0
-            change_rate = 0.0
-            trading_volume = 0.0
-            trading_value = 0.0
+        is_us_stock = any(c.isalpha() for c in symbol)
+        
+        if is_us_stock:
+            raise Exception("해외 주식 시세는 KIS 거래소를 통해 조회할 수 없습니다.")
+        else:
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+            headers = {
+                "content-type": "application/json; charset=utf-8",
+                "tr_id": "FHKST01010100",
+                "custtype": "P"
+            }
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol
+            }
+            res = self._request_with_token_retry("GET", url, headers, params=params, timeout=10)
+            if res.status_code != 200:
+                raise Exception(f"KIS get_price failed: {res.text}")
+                
+            data = res.json()
+            if data.get("rt_cd") != "0":
+                raise Exception(f"KIS get_price error: {data.get('msg1')}")
+                
+            output = data.get("output", {})
+            try:
+                current_price = float(output.get("stck_prpr", 0))
+                change_rate = float(output.get("prdy_ctrt", 0))
+                trading_volume = float(output.get("acml_vol", 0))
+                trading_value = float(output.get("acml_tr_pbmn", 0))
+            except (ValueError, TypeError):
+                current_price = 0.0
+                change_rate = 0.0
+                trading_volume = 0.0
+                trading_value = 0.0
 
         if not trading_value and current_price and trading_volume:
             trading_value = current_price * trading_volume
@@ -720,15 +777,17 @@ class KISClient(ExchangeClient):
 
     def get_balance(self) -> dict:
         _enforce_kis_mock_rate_limit(self.env)
-        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
         token = self._get_cached_token()
-        headers = {
+        
+        # 1. 국내 주식 잔고 조회
+        domestic_url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+        domestic_headers = {
             "authorization": f"Bearer {token}",
             "appkey": self.appkey,
             "appsecret": self.appsecret,
             "tr_id": self.balance_tr_id
         }
-        params = {
+        domestic_params = {
             "CANO": self.cano,
             "ACNT_PRDT_CD": self.acnt_prdt_cd,
             "AFHR_FLPR_YN": "N",
@@ -742,47 +801,42 @@ class KISClient(ExchangeClient):
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": ""
         }
-        output1 = []
-        output2 = []
-
-        # KIS 잔고 응답은 보유 종목이 많으면 CTX_AREA 토큰으로 나뉘어 내려올 수 있습니다.
+        
+        domestic_output1 = []
+        domestic_output2 = []
+        
         for _ in range(10):
-            res = requests.get(url, headers=headers, params=params, timeout=10)
+            res = requests.get(domestic_url, headers=domestic_headers, params=domestic_params, timeout=10)
             if res.status_code != 200:
-                raise Exception(f"KIS get_balance failed: {res.text}")
-
+                break
             data = res.json()
             if data.get("rt_cd") != "0":
-                raise Exception(f"KIS get_balance error: {data.get('msg1')}")
-
-            page_output1 = data.get("output1", []) or []
-            page_output2 = data.get("output2", []) or []
-            output1.extend(page_output1)
-            if page_output2:
-                output2 = page_output2
-
+                break
+            domestic_output1.extend(data.get("output1", []) or [])
+            if data.get("output2"):
+                domestic_output2 = data.get("output2", [])
+            
             next_fk100 = str(data.get("ctx_area_fk100") or data.get("CTX_AREA_FK100") or "").strip()
             next_nk100 = str(data.get("ctx_area_nk100") or data.get("CTX_AREA_NK100") or "").strip()
             tr_cont = str(res.headers.get("tr_cont") or res.headers.get("Tr_Cont") or "").upper()
-
             if not next_fk100 and not next_nk100:
                 break
             if tr_cont and tr_cont not in {"M", "F"}:
                 break
+            domestic_params["CTX_AREA_FK100"] = next_fk100
+            domestic_params["CTX_AREA_NK100"] = next_nk100
 
-            params["CTX_AREA_FK100"] = next_fk100
-            params["CTX_AREA_NK100"] = next_nk100
-        
+        # 데이터 파싱
         holdings = []
-        for stock in output1:
+        
+        # 국내 주식 파싱
+        for stock in domestic_output1:
             try:
                 qty = float(stock.get("hldg_qty", 0))
             except (ValueError, TypeError):
                 qty = 0.0
-                
             if qty <= 0:
                 continue
-            
             symbol = stock.get("pdno", "")
             name = stock.get("prdt_name", "")
             try:
@@ -795,7 +849,7 @@ class KISClient(ExchangeClient):
                 current_price = 0.0
                 profit = 0.0
                 profit_rate = 0.0
-            
+                
             holdings.append({
                 "symbol": symbol,
                 "name": name,
@@ -805,20 +859,22 @@ class KISClient(ExchangeClient):
                 "profit": profit,
                 "profit_rate": profit_rate
             })
-            
-        total_eval = 0.0
-        available_cash = 0.0
-        if len(output2) > 0:
-            summary = output2[0]
+
+        # 평가 금액 및 예수금 합산
+        total_eval_krw = 0.0
+        available_cash_krw = 0.0
+        
+        if domestic_output2:
+            summary = domestic_output2[0]
             try:
-                total_eval = float(summary.get("tot_evlu_amt", 0))
-                available_cash = float(summary.get("dnca_tot_amt", 0))
+                total_eval_krw += float(summary.get("tot_evlu_amt", 0) or summary.get("tot_evlu_amt1", 0))
+                available_cash_krw += float(summary.get("dnca_tot_amt", 0) or summary.get("prsm_tlex_amt", 0))
             except (ValueError, TypeError):
                 pass
-                
+
         return {
-            "total_evaluation": total_eval,
-            "available_cash": available_cash,
+            "total_evaluation": total_eval_krw,
+            "available_cash": available_cash_krw,
             "available_cash_currency": "KRW",
             "available_cash_supported": True,
             "currency": "KRW",
@@ -828,62 +884,65 @@ class KISClient(ExchangeClient):
     def place_order(self, symbol: str, qty: float, side: str, ord_type: str, price: float = None) -> dict:
         """
         주식 현금 주문을 전송합니다.
-        :param symbol: 종목코드 (예: "005930")
+        :param symbol: 종목코드 (예: "005930" 또는 "AAPL")
         :param qty: 주문 수량
         :param side: 주문 방향 ("BUY" 또는 "SELL")
         :param ord_type: 호가 구분 ("LIMIT" 또는 "MARKET")
         :param price: 주문 단가 (LIMIT일 때 필수, MARKET일 때는 0 또는 생략 가능)
         """
         _enforce_kis_mock_rate_limit(self.env)
-        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
+        is_us_stock = any(c.isalpha() for c in symbol)
         token = self._get_cached_token()
-        
-        # side ("BUY"/"SELL") 에 따른 tr_id 셋업
-        tr_id = self.buy_tr_id if side.upper() == "BUY" else self.sell_tr_id
-        
-        headers = {
-            "content-type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": self.appkey,
-            "appsecret": self.appsecret,
-            "tr_id": tr_id
-        }
-        
-        # 호가 구분 매핑 (LIMIT: "00", MARKET: "01")
-        ord_dvsn = "00" if ord_type.upper() == "LIMIT" else "01"
-        
-        # 단가 보정 (MARKET이면 단가는 무조건 "0")
-        order_price = int(price) if (ord_type.upper() == "LIMIT" and price is not None) else 0
-        
-        payload = {
-            "CANO": self.cano,
-            "ACNT_PRDT_CD": self.acnt_prdt_cd,
-            "PDNO": symbol,
-            "ORD_DVSN": ord_dvsn,
-            "ORD_QTY": str(int(qty)),
-            "ORD_UNPR": str(order_price)
-        }
-        
-        res = requests.post(url, json=payload, headers=headers, timeout=10)
-        if res.status_code != 200:
-            if is_market_closed_order_error(res.text):
-                raise MarketClosedError()
-            raise Exception(f"KIS place_order failed: {res.text}")
+
+        if is_us_stock:
+            raise Exception("KIS 거래소는 해외 주식 주문을 지원하지 않습니다.")
+        else:
+            url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
+            tr_id = self.buy_tr_id if side.upper() == "BUY" else self.sell_tr_id
             
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            message = data.get("msg1")
-            if is_market_closed_order_error(message):
-                raise MarketClosedError()
-            raise Exception(f"KIS place_order error: {message}")
+            ord_dvsn = "00" if ord_type.upper() == "LIMIT" else "01"
+            order_price = int(price) if (ord_type.upper() == "LIMIT" and price is not None) else 0
             
-        output = data.get("output", {})
-        return {
-            "order_id": output.get("ODNO", ""),
-            "order_org_no": output.get("KRX_FWDG_ORD_ORGNO", ""),
-            "status": "ORDERED",
-            "raw": data
-        }
+            payload = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "PDNO": symbol,
+                "ORD_DVSN": ord_dvsn,
+                "ORD_QTY": str(int(qty)),
+                "ORD_UNPR": str(order_price)
+            }
+            
+            hashval = self._get_hashkey(payload)
+            headers = {
+                "content-type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": self.appkey,
+                "appsecret": self.appsecret,
+                "tr_id": tr_id,
+                "custtype": "P",
+                "hashkey": hashval
+            }
+            
+            res = requests.post(url, json=payload, headers=headers, timeout=10)
+            if res.status_code != 200:
+                if is_market_closed_order_error(res.text):
+                    raise MarketClosedError()
+                raise Exception(f"KIS place_order failed: {res.text}")
+                
+            data = res.json()
+            if data.get("rt_cd") != "0":
+                message = data.get("msg1")
+                if is_market_closed_order_error(message):
+                    raise MarketClosedError()
+                raise Exception(f"KIS place_order error: {message}")
+                
+            output = data.get("output", {})
+            return {
+                "order_id": output.get("ODNO", ""),
+                "order_org_no": output.get("KRX_FWDG_ORD_ORGNO", ""),
+                "status": "ORDERED",
+                "raw": data
+            }
 
     def get_modifiable_orders(self) -> list[dict]:
         """

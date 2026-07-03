@@ -292,6 +292,12 @@ ERROR_GUIDES = {
             "action": "주문 수량을 늘리거나 가격을 확인한 뒤 다시 시도하세요.",
             "severity": "warning",
         },
+        "-4161": {
+            "title": "격리 포지션 보유 중 레버리지 하향 불가",
+            "message": "격리 마진 모드(Isolated)에서 오픈된 포지션이 있을 때는 레버리지를 낮추는 것이 거래소 정책상 금지되어 있습니다.",
+            "action": "현재 오픈된 격리 포지션을 모두 정리(청산)한 후 레버리지를 낮추거나, 기존 레버리지 배수를 유지하여 주문하세요.",
+            "severity": "warning",
+        },
     },
     "KIS": {
         "MARKET_CLOSED": {
@@ -484,6 +490,16 @@ KEYWORD_GUIDES = [
             "title": "주문 또는 출금 가능 잔고가 부족합니다.",
             "message": "요청 수량/금액이 현재 사용 가능한 잔고보다 큽니다.",
             "action": "수량을 줄이거나 거래소 앱에서 사용 가능 잔고를 확인하세요.",
+            "severity": "warning",
+        },
+    ),
+    (
+        "LEVERAGE_REDUCTION_RESTRICTED",
+        ["leverage reduction is not supported", "leverage reduction", "margin mode with open positions"],
+        {
+            "title": "격리 포지션 보유 중 레버리지 하향 불가",
+            "message": "격리 마진 모드(Isolated)에서 오픈된 포지션이 있을 때는 레버리지를 낮추는 것이 거래소 정책상 금지되어 있습니다.",
+            "action": "현재 오픈된 격리 포지션을 모두 정리(청산)한 후 레버리지를 낮추거나, 기존 레버리지 배수를 유지하여 주문하세요.",
             "severity": "warning",
         },
     ),

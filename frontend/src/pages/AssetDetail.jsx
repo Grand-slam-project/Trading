@@ -9,9 +9,39 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050
 const OPEN_ORDER_SELECT_FIELDS = 'id,exchange,asset_type,ticker,symbol,side,price,volume,ord_type,currency,broker_env,external_order_id,status,created_at'
 const AUTO_RULE_SELECT_FIELDS = 'id,exchange,asset_type,ticker,symbol,broker_env,entry_price,investment_amount,quantity,target_profit_rate,stop_loss_rate,execution_mode,trigger_side,trigger_price,triggered_at,last_checked_at,last_error,status,created_at,updated_at'
 const ACTIONABLE_ORDER_STATUSES = ['PENDING', 'APPROVED', 'ORDERED', 'OPEN', 'PARTIALLY_FILLED', 'MODIFIED']
+const STOCK_WARNING_BADGE_META = {
+  TRADING_SUSPENDED: {
+    tone: 'border-rose-500/50 bg-rose-500/15 text-rose-200',
+  },
+  LIQUIDATION_TRADING: {
+    tone: 'border-rose-500/40 bg-rose-500/12 text-rose-300',
+  },
+  INVESTMENT_RISK: {
+    tone: 'border-orange-500/40 bg-orange-500/12 text-orange-300',
+  },
+  INVESTMENT_WARNING: {
+    tone: 'border-amber-500/40 bg-amber-500/12 text-amber-300',
+  },
+  OVERHEATED: {
+    tone: 'border-yellow-500/40 bg-yellow-500/12 text-yellow-200',
+  },
+  VI_STATIC_AND_DYNAMIC: {
+    tone: 'border-sky-500/40 bg-sky-500/12 text-sky-300',
+  },
+  VI_STATIC: {
+    tone: 'border-sky-500/40 bg-sky-500/12 text-sky-300',
+  },
+  VI_DYNAMIC: {
+    tone: 'border-sky-500/40 bg-sky-500/12 text-sky-300',
+  },
+  STOCK_WARRANTS: {
+    tone: 'border-fuchsia-500/40 bg-fuchsia-500/12 text-fuchsia-300',
+  },
+}
 
 const isActionableOrderStatus = (status) => ACTIONABLE_ORDER_STATUSES.includes(String(status || '').toUpperCase())
 const isCancelReplaceExchange = (exchange) => ['COINONE', 'BINANCE', 'BINANCE_UM_FUTURES'].includes(String(exchange || '').toUpperCase())
+const getStockWarningBadgeTone = (warningType) => STOCK_WARNING_BADGE_META[String(warningType || '').toUpperCase()]?.tone || 'border-slate-600 bg-slate-800/70 text-slate-200'
 
 const getOrderStatusLabel = (status) => {
   const normalized = String(status || '').toUpperCase()
@@ -51,6 +81,33 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const navigate = useNavigate()
   const normalizedRouteAssetType = String(assetType || '').toUpperCase() === 'STOCK' ? 'STOCK' : 'CRYPTO'
   const [resolvedAssetType, setResolvedAssetType] = useState(normalizedRouteAssetType)
+
+  // API 권한 체크 헬퍼
+  const getBinancePermissions = () => {
+    if (!brokerAvailability || !isLoggedIn) return null;
+    const binanceData = brokerAvailability['BINANCE'];
+    if (!binanceData || !binanceData.accounts) return null;
+    
+    const activeAccount = binanceData.accounts.find(
+      acc => String(acc.broker_env).toUpperCase() === String(brokerEnv).toUpperCase()
+    );
+    return activeAccount?.api_permissions || null;
+  };
+
+  const isBinancePermissionMissing = () => {
+    if (brokerEnv !== 'REAL') return false;
+    
+    const perms = getBinancePermissions();
+    if (!perms || Object.keys(perms).length === 0) return false;
+    
+    if (exchange === 'BINANCE') {
+      return perms.spot_trade_enabled === false;
+    }
+    if (exchange === 'BINANCE_UM_FUTURES') {
+      return perms.futures_trade_enabled === false;
+    }
+    return false;
+  };
 
   const getCurrencySign = () => {
     if (exchange === 'COINONE') return '₩';
@@ -125,6 +182,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [priceChangeRate, setPriceChangeRate] = useState(0)
   const [previousClosePrice, setPreviousClosePrice] = useState(null)
   const [hasAuthoritativeChangeRate, setHasAuthoritativeChangeRate] = useState(false)
+  const [oppositeCurrentPrice, setOppositeCurrentPrice] = useState(null)
 
   // 4. 주문 폼 상태
   const [side, setSide] = useState('BUY') // BUY | SELL
@@ -135,6 +193,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [targetProfitRate, setTargetProfitRate] = useState(5.0)
   const [stopLossRate, setStopLossRate] = useState(-3.0)
   const [autoExitExecutionMode, setAutoExitExecutionMode] = useState('PROPOSAL')
+  const [autoExitRateType, setAutoExitRateType] = useState('PRICE') // PRICE | ROE
   const [futuresIntent, setFuturesIntent] = useState('LONG_OPEN')
   const [futuresLeverage, setFuturesLeverage] = useState(1)
   const [futuresMarginType, setFuturesMarginType] = useState('CROSSED')
@@ -147,6 +206,42 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     SHORT_CLOSE: { label: '숏 청산', side: 'BUY', reduceOnly: true, tone: 'slate' },
   }
   const currentFuturesIntent = futuresIntentMeta[futuresIntent] || futuresIntentMeta.LONG_OPEN
+  const getAutoExitTargetPrices = () => {
+    const entryPrice = parseFloat(price) || currentPrice || 0
+    if (entryPrice <= 0) return null
+    
+    const rawTP = parseFloat(targetProfitRate) || 0
+    const rawSL = parseFloat(stopLossRate) || 0
+    const lev = isFuturesOrder ? (Number(futuresLeverage) || 1) : 1
+    
+    // 최종 가격 변동 비율 (%)
+    const tpPercent = autoExitRateType === 'ROE' ? (rawTP / lev) : rawTP
+    const slPercent = autoExitRateType === 'ROE' ? (rawSL / lev) : rawSL
+    
+    // 숏 포지션(숏 진입) 여부 판별
+    const isShort = isFuturesOrder && futuresIntent === 'SHORT_OPEN'
+    
+    let tpPrice = 0
+    let slPrice = 0
+    
+    if (isShort) {
+      // 숏은 가격 하락 시 익절, 상승 시 손절
+      tpPrice = entryPrice * (1 - tpPercent / 100)
+      slPrice = entryPrice * (1 - slPercent / 100)
+    } else {
+      // 롱 및 국내 주식 매수는 가격 상승 시 익절, 하락 시 손절
+      tpPrice = entryPrice * (1 + tpPercent / 100)
+      slPrice = entryPrice * (1 + slPercent / 100)
+    }
+    
+    return {
+      tpPrice,
+      slPrice,
+      tpPercent,
+      slPercent
+    }
+  }
+
   const effectiveSide = isFuturesOrder ? currentFuturesIntent.side : side
   const effectiveReduceOnly = isFuturesOrder ? currentFuturesIntent.reduceOnly : false
 
@@ -174,6 +269,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const [disclosureSyncing, setDisclosureSyncing] = useState(false)
   const [disclosureSyncMessage, setDisclosureSyncMessage] = useState({ text: '', isError: false })
   const [displayName, setDisplayName] = useState(symbol)
+  const [stockWarnings, setStockWarnings] = useState([])
   const [marketFeeds, setMarketFeeds] = useState({
     candles: { source: 'IDLE', isMock: false, degradedReason: '' },
     orderbook: { source: 'OFF', isMock: false, degradedReason: '' },
@@ -332,6 +428,22 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     }
 
     setAutoRulesLoading(true)
+    
+    // 반대 환경(REAL/MOCK)의 실시간 시세도 비동기로 함께 확보하여 감시 수익률 계산에 대입
+    const oppositeEnv = brokerEnv === 'REAL' ? 'MOCK' : 'REAL'
+    fetch(`${API_BASE_URL}/api/chart/candles?exchange=${exchange}&symbol=${getExchangeSymbol(exchange)}&interval=1m&limit=1&broker_env=${oppositeEnv}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.data && data.data.length > 0) {
+          const lastCandle = data.data[data.data.length - 1]
+          const priceVal = lastCandle && typeof lastCandle === 'object' ? (lastCandle.close ?? lastCandle[4] ?? lastCandle.closePrice) : null
+          if (priceVal) {
+            setOppositeCurrentPrice(Number(priceVal))
+          }
+        }
+      })
+      .catch(err => console.error('반대 환경 시세 조회 실패:', err))
+
     try {
       const primaryResult = await supabase
         .from('auto_trading_rules')
@@ -505,11 +617,19 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       return
     }
 
-    const { data, error } = await supabase
+    let query = supabase
       .from('trade_proposals')
       .select('id,exchange,broker_env,symbol,ticker,side,status,volume,price,created_at')
+      .eq('user_id', session.user.id)
+      .eq('exchange', exchange)
       .or(buildSymbolOrFilter())
       .order('created_at', { ascending: false })
+
+    if (brokerEnv) {
+      query = query.eq('broker_env', brokerEnv)
+    }
+
+    const { data, error } = await query
 
     if (error || !data?.length) {
       setTradeHoldingContext(null)
@@ -615,6 +735,39 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       setIsFavorite(hasMatch)
     } catch (e) {
       console.warn('즐겨찾기 상태 로드 실패:', e)
+    }
+  }
+
+  const fetchStockWarnings = async () => {
+    if (resolvedAssetType !== 'STOCK') {
+      setStockWarnings([])
+      return
+    }
+
+    const authHeader = await getAuthHeader()
+    if (!authHeader) {
+      setStockWarnings([])
+      return
+    }
+
+    try {
+      const params = new URLSearchParams({
+        symbol: String(symbol || '').trim().toUpperCase(),
+        exchange: 'TOSS',
+        broker_env: brokerEnv,
+      })
+      const response = await fetch(`${API_BASE_URL}/api/stocks/warnings?${params.toString()}`, {
+        headers: {
+          Authorization: authHeader,
+        },
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || !payload.success) {
+        throw payload
+      }
+      setStockWarnings(Array.isArray(payload.data?.warnings) ? payload.data.warnings : [])
+    } catch {
+      setStockWarnings([])
     }
   }
 
@@ -1474,6 +1627,13 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   }, [currentPrice, previousClosePrice, chartInterval, hasAuthoritativeChangeRate])
 
   const handleExchangeChange = (newEx, newEnv = 'REAL') => {
+    // 해외 주식(티커에 알파벳 포함)인 경우 KIS 선택 차단
+    const isUsStock = resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol);
+    if (isUsStock && newEx === 'KIS') {
+      alert("해외주식은 Toss API만 지원합니다.");
+      return;
+    }
+
     // 가상자산은 Real만 가용하므로 항상 통과, 주식의 경우 KIS MOCK은 기본 제공 폴백이므로 항상 통과
     const isMockKis = newEx === 'KIS' && newEnv === 'MOCK'
     const isCrypto = resolvedAssetType === 'CRYPTO'
@@ -1510,13 +1670,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     if (!symbolLookupReady) return
 
     setNewsSyncMessage({ text: '', isError: false })
+    fetchStockWarnings()
     fetchCandles()
     fetchUserBalance()
+    loadTradeHoldingContext()
     loadOpenOrders()
     loadAutoTradingRules()
     fetchNewsList()
     fetchDisclosureList()
-  }, [exchange, symbol, chartInterval, brokerEnv, symbolLookupReady])
+  }, [exchange, symbol, chartInterval, brokerEnv, symbolLookupReady, resolvedAssetType])
 
   useEffect(() => {
     fetchSymbolMetadata()
@@ -1548,6 +1710,15 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         return
       }
 
+      const isUsStock = resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol);
+      if (isUsStock) {
+        if (exchange !== 'TOSS' || brokerEnv !== 'REAL') {
+          setExchange('TOSS')
+          setBrokerEnv('REAL')
+        }
+        return
+      }
+
       const preferredBroker = pickPreferredStockBroker(brokerAvailability)
       const currentBrokerValid = isRegisteredStockBroker(brokerAvailability, exchange, brokerEnv)
       if (preferredBroker && !currentBrokerValid) {
@@ -1574,7 +1745,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       setExchange(routeSymbol.endsWith('USDT') || routeSymbol.endsWith('BUSD') ? 'BINANCE' : 'COINONE')
     }
 
-    if (exchange !== 'BINANCE_UM_FUTURES' && brokerEnv !== 'REAL') {
+    if (['COINONE', 'TOSS'].includes(exchange) && brokerEnv !== 'REAL') {
       setBrokerEnv('REAL')
     }
     if (!['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M'].includes(chartInterval)) {
@@ -1764,6 +1935,12 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     setSubmitting(true)
     setTradeMessage({ text: '', isError: false })
 
+    if (isTradingSuspended) {
+      setTradeMessage({ text: tradeRestrictionMessage, isError: true })
+      setSubmitting(false)
+      return
+    }
+
     const authHeader = await getAuthHeader()
     if (!authHeader) {
       setTradeMessage({ text: '로그인이 필요합니다.', isError: true })
@@ -1798,12 +1975,6 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
       }
     }
 
-    if (brokerEnv === 'REAL' && orderPrecheck?.exceeds_real_order_limit) {
-      setTradeMessage({ text: '실거래 1회 주문 한도를 초과했습니다. 수량 또는 단가를 조정해 주세요.', isError: true })
-      setSubmitting(false)
-      return
-    }
-
     if (brokerEnv === 'REAL' && orderPrecheck?.insufficient_cash) {
       setTradeMessage({ text: '예수금보다 큰 주문입니다. 수량 또는 단가를 조정해 주세요.', isError: true })
       setSubmitting(false)
@@ -1826,8 +1997,16 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         price: orderType === 'LIMIT' ? parseFloat(price) : null,
         broker_env: brokerEnv,
         auto_exit: autoExit,
-        target_profit_rate: autoExit ? parseFloat(targetProfitRate) : null,
-        stop_loss_rate: autoExit ? parseFloat(stopLossRate) : null,
+        target_profit_rate: autoExit ? (
+          autoExitRateType === 'ROE' && exchange === 'BINANCE_UM_FUTURES'
+            ? parseFloat(targetProfitRate) / (Number(futuresLeverage) || 1)
+            : parseFloat(targetProfitRate)
+        ) : null,
+        stop_loss_rate: autoExit ? (
+          autoExitRateType === 'ROE' && exchange === 'BINANCE_UM_FUTURES'
+            ? parseFloat(stopLossRate) / (Number(futuresLeverage) || 1)
+            : parseFloat(stopLossRate)
+        ) : null,
         auto_exit_execution_mode: autoExit ? autoExitExecutionMode : 'PROPOSAL',
         position_side: exchange === 'BINANCE_UM_FUTURES' ? 'BOTH' : null,
         reduce_only: exchange === 'BINANCE_UM_FUTURES' ? effectiveReduceOnly : false,
@@ -1893,12 +2072,17 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
   const myHoldingDirection = myHolding?.position_direction || (myHoldingQty < 0 ? 'SHORT' : 'LONG')
   const baseAvailableCash = Number(userBalance?.available_cash ?? NaN)
   const overallFeedStatus = getOverallFeedStatus()
-  const isOrderBlocked = brokerEnv === 'REAL' && (
-    orderPrecheck?.exceeds_real_order_limit ||
+  const isTradingSuspended = resolvedAssetType === 'STOCK' && stockWarnings.some((warning) => String(warning.warning_type || '').toUpperCase() === 'TRADING_SUSPENDED')
+  const tradeRestrictionMessage = isTradingSuspended
+    ? '거래중지 종목으로 확인되어 주문을 비활성화했습니다. 거래 재개 후 다시 시도해 주세요.'
+    : orderPrecheck?.is_market_closed
+      ? orderPrecheck.market_status_message || '현재는 거래가 불가능한 장외 시간(또는 휴장일)입니다.'
+      : ''
+  const isOrderBlocked = isTradingSuspended || orderPrecheck?.is_market_closed || (brokerEnv === 'REAL' && (
     orderPrecheck?.futures_real_blocked ||
     orderPrecheck?.insufficient_cash ||
     orderPrecheck?.insufficient_holding
-  )
+  ))
   const chartCardClassName = isChartExpanded
     ? 'fixed inset-3 z-50 flex flex-col gap-4 rounded-2xl border border-cyan-500/40 bg-[#0e1529] p-4 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl sm:inset-6'
     : 'bg-[#0e1529]/90 border border-[#1f2945] rounded-xl p-4 flex flex-col gap-4 backdrop-blur-md'
@@ -1921,7 +2105,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
     return '주'
   }
   const getEstimatedHoldingCurrencySign = (holding) => (
-    ['BINANCE', 'BINANCE_UM_FUTURES'].includes(String(holding?.exchange || '').toUpperCase()) ? '$' : getCurrencySign()
+    ['BINANCE', 'BINANCE_UM_FUTURES'].includes(String(holding?.exchange || '').toUpperCase()) ? '$'
+      : ['COINONE', 'KIS', 'TOSS'].includes(String(holding?.exchange || '').toUpperCase()) ? '₩'
+        : getCurrencySign()
   )
   const getEstimatedHoldingNotice = (holding) => {
     const estimatedExchange = String(holding?.exchange || exchange || '').toUpperCase()
@@ -1979,10 +2165,10 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
         {/* 뒤로가기 버튼 */}
         <div className="mt-2 mb-4">
           <button
-            onClick={() => navigate('/dashboard')}
+            onClick={() => navigate('/')}
             className="flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-white transition-all bg-transparent border-none cursor-pointer outline-none"
           >
-            <span>← 대시보드로 돌아가기</span>
+            <span>← 홈으로 돌아가기</span>
           </button>
         </div>
 
@@ -1997,15 +2183,24 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                 {overallFeedStatus.label}
               </span>
             </div>
-            <h1 className="text-xl font-bold font-mono text-white mt-1.5 flex items-center gap-2">
-              {displayName !== symbol ? `${displayName} (${symbol})` : symbol}{' '}
-              <span className="text-xs text-slate-400 font-normal">
-                ({resolvedAssetType === 'STOCK' ? '주식' : '가상자산'})
-              </span>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-bold font-mono text-white flex items-center gap-2 min-w-0">
+                <span className="break-all">
+                  {displayName !== symbol ? `${displayName} (${symbol})` : symbol}
+                </span>
+                <span className="text-xs text-slate-400 font-normal shrink-0">
+                  ({resolvedAssetType === 'STOCK' ? '주식' : '가상자산'})
+                </span>
+              </h1>
+              {resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol) && (
+                <span className="text-[10px] font-bold text-orange-400 bg-orange-950/40 border border-orange-900/60 px-2 py-1 rounded shrink-0">
+                  해외주식은 toss api만 지원합니다
+                </span>
+              )}
               <button
                 type="button"
                 onClick={handleToggleFavorite}
-                className={`text-[22px] leading-none transition ml-1.5 cursor-pointer focus:outline-none ${
+                className={`text-[22px] leading-none transition cursor-pointer focus:outline-none ${
                   isFavorite ? 'text-red-400 hover:text-red-300' : 'text-slate-400 hover:text-cyan-400'
                 }`}
                 aria-label="즐겨찾기"
@@ -2013,7 +2208,21 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
               >
                 {isFavorite ? '♥' : '♡'}
               </button>
-            </h1>
+              {stockWarnings.slice(0, 3).map((warning) => (
+                <span
+                  key={`${warning.warning_type}-${warning.start_date || 'active'}`}
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-bold leading-none ${getStockWarningBadgeTone(warning.warning_type)}`}
+                  title={warning.label}
+                >
+                  {warning.label}
+                </span>
+              ))}
+              {stockWarnings.length > 3 ? (
+                <span className="inline-flex items-center rounded-full border border-slate-600 bg-slate-800/70 px-2.5 py-1 text-[11px] font-bold leading-none text-slate-200">
+                  +{stockWarnings.length - 3}
+                </span>
+              ) : null}
+            </div>
             <p className="mt-2 text-[10px] text-slate-500 font-mono">
               {showLevel2Panel
                 ? `차트 ${marketFeeds.candles.source} · 호가 ${marketFeeds.orderbook.source} · 체결 ${marketFeeds.trades.source}`
@@ -2359,12 +2568,16 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   {autoRules.map((rule) => {
                     const entryPrice = Number(rule.entry_price || 0)
                     const targetRate = Number(rule.target_profit_rate || 0)
-                    const stopRate = Number(rule.stop_loss_rate || 0)
+                    const rawStopRate = Number(rule.stop_loss_rate || 0)
+                    const stopRate = rawStopRate > 0 ? -Math.abs(rawStopRate) : rawStopRate
                     const targetPrice = entryPrice > 0 ? entryPrice * (1 + targetRate / 100) : 0
                     const stopPrice = entryPrice > 0 ? entryPrice * (1 + stopRate / 100) : 0
                     const isRunning = String(rule.status || '').toUpperCase() === 'RUNNING'
-                    const currentReturnRate = entryPrice > 0 && currentPrice > 0
-                      ? ((Number(currentPrice) - entryPrice) / entryPrice) * 100
+                    const ruleEnv = rule.broker_env || brokerEnv
+                    const activePrice = ruleEnv === brokerEnv ? currentPrice : (oppositeCurrentPrice || currentPrice)
+
+                    const currentReturnRate = entryPrice > 0 && activePrice > 0
+                      ? ((Number(activePrice) - entryPrice) / entryPrice) * 100
                       : null
                     const currentReturnClass = currentReturnRate === null
                       ? 'text-slate-300'
@@ -2438,7 +2651,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                               {formatSignedPercentValue(currentReturnRate)}
                             </p>
                             <p className="font-mono text-[10px] text-slate-600">
-                              현재가 {currentPrice > 0 ? formatUnitPrice(currentPrice) : '-'}
+                              현재가 {activePrice > 0 ? `${formatUnitPrice(activePrice)}${ruleEnv !== brokerEnv ? ` (${ruleEnv})` : ''}` : '-'}
                             </p>
                           </div>
                           <div>
@@ -2947,6 +3160,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   <button
                     type="button"
                     onClick={() => setSide('BUY')}
+                    disabled={isTradingSuspended}
                     className={`text-xs font-bold py-1.5 rounded transition-all cursor-pointer ${side === 'BUY' ? 'bg-[#ef4444] text-white' : 'text-slate-400 hover:text-white'}`}
                   >
                     구매
@@ -2954,6 +3168,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   <button
                     type="button"
                     onClick={() => setSide('SELL')}
+                    disabled={isTradingSuspended}
                     className={`text-xs font-bold py-1.5 rounded transition-all cursor-pointer ${side === 'SELL' ? 'bg-[#3b82f6] text-white' : 'text-slate-400 hover:text-white'}`}
                   >
                     판매
@@ -2977,6 +3192,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                       value="LIMIT"
                       checked={orderType === 'LIMIT'}
                       onChange={() => setOrderType('LIMIT')}
+                      disabled={isTradingSuspended}
                       className="accent-cyan-400"
                     />
                     지정가
@@ -2990,7 +3206,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                       onChange={() => {
                         if (exchange !== 'COINONE') setOrderType('MARKET')
                       }}
-                      disabled={exchange === 'COINONE'}
+                      disabled={exchange === 'COINONE' || isTradingSuspended}
                       className="accent-cyan-400"
                     />
                     시장가
@@ -3060,7 +3276,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   <span className="text-[10px] text-slate-400 font-bold">주문 단가 ({orderCurrencyCode})</span>
                   <input
                     type="number"
-                    disabled={orderType === 'MARKET'}
+                    disabled={orderType === 'MARKET' || isTradingSuspended}
                     value={orderType === 'MARKET' ? currentPrice : price}
                     onChange={(e) => setPrice(e.target.value)}
                     placeholder="단가를 입력하세요"
@@ -3078,60 +3294,108 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                     onChange={(e) => setQuantity(e.target.value)}
                     placeholder="수량을 입력하세요"
                     className="w-full bg-[#070b19] border border-[#1f2945] text-[#e2e2ec] font-mono rounded px-3 py-2 text-xs focus:outline-none focus:border-cyan-400"
+                    disabled={isTradingSuspended}
                     required
                   />
                 </div>
 
                 {/* 3. 거래 계좌 스위처 토글 */}
                 <div className="flex flex-col gap-1.5">
-                  <span className="text-[10px] text-slate-400 font-bold">주문 거래소 계좌</span>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-slate-400 font-bold">주문 거래소 계좌</span>
+                    {resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol) && (
+                      <span className="text-[9px] font-bold text-orange-400">해외주식은 toss api만 지원합니다</span>
+                    )}
+                  </div>
                   {resolvedAssetType === 'STOCK' ? (
                     <div className="grid grid-cols-3 gap-1 bg-[#070b19] p-0.5 rounded border border-[#1f2945]">
                       <button
                         type="button"
                         onClick={() => handleExchangeChange('KIS', 'MOCK')}
-                        className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'KIS' && brokerEnv === 'MOCK' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
+                        disabled={isTradingSuspended || (resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol))}
+                        className={`text-[10px] font-bold py-1.5 rounded transition-all ${
+                          resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol)
+                            ? 'opacity-30 cursor-not-allowed text-slate-600 bg-transparent'
+                            : exchange === 'KIS' && brokerEnv === 'MOCK'
+                            ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60 cursor-pointer'
+                            : 'text-slate-400 hover:text-white cursor-pointer'
+                        }`}
                       >
                         한투 모의
                       </button>
                       <button
                         type="button"
                         onClick={() => handleExchangeChange('KIS', 'REAL')}
-                        className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'KIS' && brokerEnv === 'REAL' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
+                        disabled={isTradingSuspended || (resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol))}
+                        className={`text-[10px] font-bold py-1.5 rounded transition-all ${
+                          resolvedAssetType === 'STOCK' && !/^\d+$/.test(symbol)
+                            ? 'opacity-30 cursor-not-allowed text-slate-600 bg-transparent'
+                            : exchange === 'KIS' && brokerEnv === 'REAL'
+                            ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60 cursor-pointer'
+                            : 'text-slate-400 hover:text-white cursor-pointer'
+                        }`}
                       >
                         한투 실거래
                       </button>
                       <button
                         type="button"
                         onClick={() => handleExchangeChange('TOSS', 'REAL')}
+                        disabled={isTradingSuspended}
                         className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'TOSS' && brokerEnv === 'REAL' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
                       >
                         토스 실거래
                       </button>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-3 gap-1 bg-[#070b19] p-0.5 rounded border border-[#1f2945]">
-                      <button
-                        type="button"
-                        onClick={() => handleExchangeChange('COINONE', 'REAL')}
-                        className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'COINONE' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
-                      >
-                        코인원
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleExchangeChange('BINANCE', 'REAL')}
-                        className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'BINANCE' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
-                      >
-                        바이낸스 현물
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleExchangeChange('BINANCE_UM_FUTURES', 'MOCK')}
-                        className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'BINANCE_UM_FUTURES' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
-                      >
-                        선물 모의
-                      </button>
+                    <div className="flex flex-col gap-1.5">
+                      <div className="grid grid-cols-3 gap-1 bg-[#070b19] p-0.5 rounded border border-[#1f2945]">
+                        <button
+                          type="button"
+                          onClick={() => handleExchangeChange('COINONE', 'REAL')}
+                          disabled={isTradingSuspended}
+                          className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'COINONE' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
+                        >
+                          코인원
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExchangeChange('BINANCE', brokerEnv)}
+                          disabled={isTradingSuspended}
+                          className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'BINANCE' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
+                        >
+                          바이낸스 현물
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExchangeChange('BINANCE_UM_FUTURES', brokerEnv)}
+                          disabled={isTradingSuspended}
+                          className={`text-[10px] font-bold py-1.5 rounded transition-all cursor-pointer ${exchange === 'BINANCE_UM_FUTURES' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-400 hover:text-white'}`}
+                        >
+                          바이낸스 선물
+                        </button>
+                      </div>
+
+                      {['BINANCE', 'BINANCE_UM_FUTURES'].includes(exchange) && (
+                        <div className="flex items-center justify-between bg-[#070b19] border border-[#1f2945] p-1 rounded">
+                          <span className="text-[10px] font-bold text-slate-400 pl-1.5">거래 환경</span>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleExchangeChange(exchange, 'REAL')}
+                              className={`text-[9px] font-bold px-2.5 py-1 rounded transition-all cursor-pointer ${brokerEnv === 'REAL' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-500 hover:text-white bg-transparent'}`}
+                            >
+                              실거래 (REAL)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExchangeChange(exchange, 'MOCK')}
+                              className={`text-[9px] font-bold px-2.5 py-1 rounded transition-all cursor-pointer ${brokerEnv === 'MOCK' ? 'bg-[#1b253b] text-cyan-400 border border-cyan-900/60' : 'text-slate-500 hover:text-white bg-transparent'}`}
+                            >
+                              모의투자 (MOCK)
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3225,7 +3489,7 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                           : 'border-emerald-900/60 bg-emerald-950/20 text-emerald-300'
                       }`}>
                         {isOrderBlocked
-                          ? (orderPrecheck.warnings?.join(' ') || '실거래 주문 조건을 다시 확인해 주세요.')
+                          ? (tradeRestrictionMessage || orderPrecheck.warnings?.join(' ') || '실거래 주문 조건을 다시 확인해 주세요.')
                           : '현재 입력값 기준으로 즉시 주문 가능 범위를 확인했습니다.'}
                       </div>
                     </>
@@ -3281,9 +3545,43 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                             <span className="mt-1 block text-[9px] leading-relaxed">감시 워커가 조건 충족 시 매도 주문을 직접 전송합니다.</span>
                           </button>
                         </div>
+                        
+                        {/* 감시 기준 선택 (선물일 때만 노출) */}
+                        {isFuturesOrder && (
+                          <div className="flex items-center justify-between px-1">
+                            <span className="text-[10px] text-slate-400">감시 기준 설정</span>
+                            <div className="flex gap-1 bg-[#070b19] border border-[#1f2945] p-0.5 rounded text-[9px]">
+                              <button
+                                type="button"
+                                onClick={() => setAutoExitRateType('PRICE')}
+                                className={`px-2 py-0.5 rounded transition ${
+                                  autoExitRateType === 'PRICE'
+                                    ? 'bg-[#1f2945] text-cyan-300 font-bold'
+                                    : 'text-slate-500 hover:text-slate-400'
+                                }`}
+                              >
+                                자산 가격 (%)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setAutoExitRateType('ROE')}
+                                className={`px-2 py-0.5 rounded transition ${
+                                  autoExitRateType === 'ROE'
+                                    ? 'bg-[#1f2945] text-purple-300 font-bold'
+                                    : 'text-slate-500 hover:text-slate-400'
+                                }`}
+                              >
+                                투자금(ROE) (%)
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
                         <div className="grid grid-cols-2 gap-2 bg-[#070b19] border border-[#1f2945] rounded p-2.5">
                           <div className="flex flex-col gap-1">
-                            <label className="text-[9px] font-bold text-green-400">목표 익절 (%)</label>
+                            <label className="text-[9px] font-bold text-green-400">
+                              목표 익절 (%) {autoExitRateType === 'ROE' && <span className="text-purple-400 font-normal">(ROE)</span>}
+                            </label>
                             <input
                               type="number"
                               step="0.1"
@@ -3291,9 +3589,17 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                               onChange={(e) => setTargetProfitRate(e.target.value)}
                               className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
                             />
+                            {getAutoExitTargetPrices() && (
+                              <span className="text-[8px] text-slate-400 font-mono text-center mt-0.5 break-all">
+                                목표가: ${getAutoExitTargetPrices().tpPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {autoExitRateType === 'ROE' && ` (가격 ${getAutoExitTargetPrices().tpPercent.toFixed(2)}%)`}
+                              </span>
+                            )}
                           </div>
                           <div className="flex flex-col gap-1">
-                            <label className="text-[9px] font-bold text-red-400">손실 제한 (%)</label>
+                            <label className="text-[9px] font-bold text-red-400">
+                              손실 제한 (%) {autoExitRateType === 'ROE' && <span className="text-purple-400 font-normal">(ROE)</span>}
+                            </label>
                             <input
                               type="number"
                               step="0.1"
@@ -3301,6 +3607,12 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                               onChange={(e) => setStopLossRate(e.target.value)}
                               className="bg-slate-800 border border-slate-700 text-[#e2e2ec] font-mono rounded py-0.5 text-xs text-center"
                             />
+                            {getAutoExitTargetPrices() && (
+                              <span className="text-[8px] text-slate-400 font-mono text-center mt-0.5 break-all">
+                                손절가: ${getAutoExitTargetPrices().slPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {autoExitRateType === 'ROE' && ` (가격 ${getAutoExitTargetPrices().slPercent.toFixed(2)}%)`}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -3308,14 +3620,9 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   </div>
                 )}
 
-                {/* 안전 가드 텍스트 */}
-                {brokerEnv === 'REAL' ? (
-                  <div className="text-[9px] text-amber-500 bg-amber-950/20 p-2 rounded border border-amber-900/40 leading-relaxed font-mono">
-                    실거래 1회 한도 10만원 하드 캐핑 안전 가드 작동 중
-                  </div>
-                ) : (
-                  <div className="text-[9px] text-slate-500 bg-slate-900/40 p-2 rounded border border-[#1f2945]/40 leading-relaxed font-mono">
-                    모의투자 테스트 모드 - 주문 한도 무제한
+                {isTradingSuspended && (
+                  <div className="text-[10px] text-rose-300 bg-rose-950/20 p-2 rounded border border-rose-900/50 leading-relaxed font-mono">
+                    {tradeRestrictionMessage}
                   </div>
                 )}
 
@@ -3326,10 +3633,18 @@ export default function AssetDetail({ isLoggedIn, userEmail, handleLogout, userP
                   </div>
                 )}
 
+                {/* API 권한 경고 배지 */}
+                {isBinancePermissionMissing() && (
+                  <div className="bg-rose-950/40 border border-rose-800/60 rounded p-2.5 text-[10px] text-rose-300 font-bold leading-relaxed">
+                    ⚠️ 해당 API Key는 바이낸스 {exchange === 'BINANCE' ? '현물(Spot)' : '선물(Futures)'} 거래 권한이 없습니다. 
+                    바이낸스 API 관리자 페이지에서 권한을 활성화한 후 API 연결을 다시 테스트해 주세요.
+                  </div>
+                )}
+
                 {/* 주문 제출 버튼 */}
                 <button
                   type="submit"
-                  disabled={submitting || precheckLoading || isOrderBlocked}
+                  disabled={submitting || precheckLoading || isOrderBlocked || isBinancePermissionMissing()}
                   className={`w-full py-2.5 rounded font-black text-[#070b19] text-xs tracking-wider transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 ${
                     isFuturesOrder
                       ? currentFuturesIntent.tone === 'red'

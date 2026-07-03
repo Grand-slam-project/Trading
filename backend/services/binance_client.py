@@ -189,6 +189,28 @@ class BinanceSpotClient:
             "raw": data
         }
 
+    def get_api_permissions(self) -> dict:
+        """
+        API Restrictions를 호출하여 현재 API Key가 가진 권한 리스트를 반환합니다.
+        """
+        if self.env != "REAL":
+            return {
+                "spot_trade_enabled": True,
+                "futures_trade_enabled": True,
+                "read_only": False,
+                "raw": {}
+            }
+
+        data = self._signed_get("/sapi/v1/account/apiRestrictions")
+        spot_trade_enabled = bool(data.get("enableSpotAndMarginTrading", False))
+        futures_trade_enabled = bool(data.get("enableFutures", False))
+        return {
+            "spot_trade_enabled": spot_trade_enabled,
+            "futures_trade_enabled": futures_trade_enabled,
+            "read_only": not (spot_trade_enabled or futures_trade_enabled),
+            "raw": data
+        }
+
     def place_order(self, symbol: str, qty: float, side: str, ord_type: str, price: float = None) -> dict:
         """
         바이낸스 현물 주문을 전송합니다. MOCK/DEMO 환경도 같은 주문 API를 사용합니다.

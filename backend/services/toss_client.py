@@ -749,6 +749,126 @@ class TossClient(ExchangeClient):
         """
         return self._get_price_impl(symbol)
 
+    def get_stock_info(self, symbol: str) -> dict:
+        """
+        종목 기본 정보와 거래정지 여부를 조회합니다.
+        """
+        token = self._get_cached_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        symbol_variants = [symbol]
+        if symbol.isdigit() and len(symbol) == 6:
+            symbol_variants.append(f"A{symbol}")
+        elif symbol.startswith("A") and symbol[1:].isdigit() and len(symbol) == 7:
+            symbol_variants.append(symbol[1:])
+
+        last_error = None
+
+        for candidate in list(dict.fromkeys(symbol_variants)):
+            url = f"{self.base_url}/api/v1/stocks"
+            res = self._send_request("GET", url, headers=headers, params={"symbols": candidate}, timeout=15)
+
+            if res.status_code != 200:
+                last_error = f"{candidate}: {res.text}"
+                continue
+
+            data = res.json()
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                last_error = f"{candidate}: {err.get('message') or err}"
+                continue
+
+            result = data.get("result", [])
+            if isinstance(result, dict):
+                result = [result]
+            if not isinstance(result, list) or not result:
+                last_error = f"{candidate}: empty stock info payload"
+                continue
+
+            item = result[0] if isinstance(result[0], dict) else {}
+            detail = item.get("koreanMarketDetail") if isinstance(item.get("koreanMarketDetail"), dict) else {}
+
+            return {
+                "symbol_used": candidate,
+                "symbol": item.get("symbol") or candidate,
+                "name": item.get("name"),
+                "market": item.get("market"),
+                "status": item.get("status"),
+                "security_type": item.get("securityType"),
+                "korean_market_detail": {
+                    "liquidation_trading": bool(detail.get("liquidationTrading")) if detail else False,
+                    "nxt_supported": detail.get("nxtSupported") if detail else None,
+                    "krx_trading_suspended": bool(detail.get("krxTradingSuspended")) if detail else False,
+                    "nxt_trading_suspended": detail.get("nxtTradingSuspended") if detail else None,
+                },
+                "raw": item,
+            }
+
+        raise Exception(f"토스 종목 기본 정보 조회 실패: {last_error or 'empty stock info payload'}")
+
+    def get_stock_warnings(self, symbol: str) -> dict:
+        """
+        종목 유의사항 및 VI 발동 정보를 조회합니다.
+        """
+        token = self._get_cached_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        symbol_variants = [symbol]
+        if symbol.isdigit() and len(symbol) == 6:
+            symbol_variants.append(f"A{symbol}")
+        elif symbol.startswith("A") and symbol[1:].isdigit() and len(symbol) == 7:
+            symbol_variants.append(symbol[1:])
+
+        last_error = None
+
+        for candidate in list(dict.fromkeys(symbol_variants)):
+            url = f"{self.base_url}/api/v1/stocks/{candidate}/warnings"
+            res = self._send_request("GET", url, headers=headers, timeout=15)
+
+            if res.status_code == 404:
+                last_error = f"{candidate}: stock-not-found"
+                continue
+
+            if res.status_code != 200:
+                last_error = f"{candidate}: {res.text}"
+                continue
+
+            data = res.json()
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                last_error = f"{candidate}: {err.get('message') or err}"
+                continue
+
+            result = data.get("result", [])
+            if not isinstance(result, list):
+                result = []
+
+            warnings = []
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                warnings.append({
+                    "warning_type": str(item.get("warningType") or item.get("warning_type") or "").upper(),
+                    "exchange": item.get("exchange"),
+                    "start_date": item.get("startDate") or item.get("start_date"),
+                    "end_date": item.get("endDate") or item.get("end_date"),
+                    "raw": item,
+                })
+
+            return {
+                "symbol_used": candidate,
+                "warnings": warnings,
+                "raw": data,
+            }
+
+        raise Exception(f"토스 종목 유의사항 조회 실패: {last_error or 'stock-not-found'}")
+
     def _place_order_impl(self, symbol: str, qty: float, side: str, ord_type: str, price: float = None) -> dict:
         if self.env == "MOCK":
             client_order_id = f"mock-toss-{uuid.uuid4().hex[:16]}"
@@ -1166,6 +1286,124 @@ class TossClient(ExchangeClient):
 
         # 3. 그 외의 경우 일봉으로 폴백
         return self.get_candles(symbol, interval="1d", count=count)
+
+    def get_market_calendar(self, country: str) -> dict:
+        """
+        지정한 국가(KR 또는 US)의 오늘 장 운영 일정을 조회합니다.
+        로컬 파일 캐시를 활용해 당일 24시간 동안 캐싱합니다.
+        """
+        import datetime
+        import json
+        import os
+        
+        country_upper = country.upper()
+        if country_upper not in ("KR", "US"):
+            raise ValueError("지원하지 않는 국가 코드입니다. 'KR' 또는 'US'만 허용됩니다.")
+
+        if self.env == "MOCK":
+            # MOCK 모드 시 mock 데이터 반환 (현재 시각 기준으로 평일 여부 판별)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            # 3~10월 서머타임(UTC-4), 11~2월 표준시(UTC-5)
+            est_offset = datetime.timedelta(hours=-4) if 3 <= now_utc.month <= 10 else datetime.timedelta(hours=-5)
+            est_now = now_utc.astimezone(datetime.timezone(est_offset))
+            
+            kst_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+
+            if country_upper == "KR":
+                is_weekend = kst_now.weekday() >= 5
+                today_str = kst_now.strftime("%Y-%m-%d")
+            else:
+                is_weekend = est_now.weekday() >= 5
+                today_str = est_now.strftime("%Y-%m-%d")
+
+            if is_weekend:
+                return {}
+
+            # 평일 영업일일 때 실제 토스 API 스펙에 맞춰 세션 정보 구성
+            if country_upper == "KR":
+                return {
+                    "today": {
+                        "date": today_str,
+                        "integrated": {
+                            "preMarket": {
+                                "startTime": f"{today_str}T08:00:00.000+09:00",
+                                "endTime": f"{today_str}T09:00:00.000+09:00"
+                            },
+                            "regularMarket": {
+                                "startTime": f"{today_str}T09:00:00.000+09:00",
+                                "endTime": f"{today_str}T15:30:00.000+09:00"
+                            },
+                            "afterMarket": {
+                                "startTime": f"{today_str}T15:30:00.000+09:00",
+                                "endTime": f"{today_str}T20:00:00.000+09:00"
+                            }
+                        }
+                    }
+                }
+            else:
+                # 미국의 경우도 동일한 integrated 구조로 가정
+                return {
+                    "today": {
+                        "date": today_str,
+                        "integrated": {
+                            "preMarket": {
+                                "startTime": f"{today_str}T04:00:00.000-04:00",
+                                "endTime": f"{today_str}T09:30:00.000-04:00"
+                            },
+                            "regularMarket": {
+                                "startTime": f"{today_str}T09:30:00.000-04:00",
+                                "endTime": f"{today_str}T16:00:00.000-04:00"
+                            },
+                            "afterMarket": {
+                                "startTime": f"{today_str}T16:00:00.000-04:00",
+                                "endTime": f"{today_str}T20:00:00.000-04:00"
+                            }
+                        }
+                    }
+                }
+
+        # REAL 환경인 경우 토스 Open API 호출
+        cache_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            f".toss_calendar_{self.user_id or 'default'}_cache.json"
+        )
+        
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        cache_data = {}
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cache_data = json.load(f)
+            except Exception:
+                pass
+                
+        if country_upper in cache_data and cache_data[country_upper].get("date") == today_str:
+            return cache_data[country_upper]["data"]
+
+        token = self._get_cached_token()
+        url = f"{self.base_url}/api/v1/market-calendar/{country_upper}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        res = self._send_request("GET", url, headers=headers)
+        if res.status_code != 200:
+            raise Exception(f"토스 장 캘린더 조회 실패: {res.text}")
+            
+        data = res.json().get("result", {})
+        
+        cache_data[country_upper] = {
+            "date": today_str,
+            "data": data
+        }
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+            
+        return data
 
     def _get_exchange_rate_impl(self) -> float:
         try:

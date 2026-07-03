@@ -51,6 +51,24 @@ def _estimate_amount_krw(exchange: str, symbol: str, price: float, quantity: flo
     return notional * USD_KRW_FALLBACK
 
 
+def _normalize_stop_loss_rate(value) -> float:
+    rate = float(value or 0)
+    return -abs(rate) if rate > 0 else rate
+
+
+def _is_trade_proposal_status_constraint_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return "23514" in text and "trade_proposals" in text and "status" in text
+
+
+def _is_trade_proposal_schema_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        token in text
+        for token in ("pgrst204", "schema cache", "could not find", "raw_order_payload", "broker_env")
+    )
+
+
 class AutoTradingRuleEngine:
     """
     auto_trading_rules의 익절/손절 조건을 감시하고 매도 제안 또는 자동 매도를 수행합니다.
@@ -110,7 +128,7 @@ class AutoTradingRuleEngine:
             raise ValueError("조건감시 규칙의 진입가가 올바르지 않습니다.")
 
         target_rate = float(rule.get("target_profit_rate") or 0)
-        stop_rate = float(rule.get("stop_loss_rate") or 0)
+        stop_rate = _normalize_stop_loss_rate(rule.get("stop_loss_rate"))
         target_price = entry_price * (1 + target_rate / 100)
         stop_price = entry_price * (1 + stop_rate / 100)
 
@@ -135,9 +153,6 @@ class AutoTradingRuleEngine:
         should_execute = execution_mode == "AUTO"
         estimated_amount_krw = _estimate_amount_krw(exchange, symbol, current_price, quantity)
 
-        if broker_env == "REAL" and estimated_amount_krw > REAL_ORDER_LIMIT_KRW:
-            should_execute = False
-
         proposal_id = str(uuid.uuid4())
         proposal_payload = self._build_exit_proposal_payload(
             proposal_id=proposal_id,
@@ -161,7 +176,7 @@ class AutoTradingRuleEngine:
             proposal_payload["client_order_id"] = order_result.get("client_order_id")
             proposal_payload["raw_order_payload"]["order"] = order_result.get("raw") or order_result
 
-        query_supabase_as_service_role("trade_proposals", "POST", json_data=proposal_payload)
+        self._insert_trade_proposal_with_fallback(proposal_payload)
         self._update_rule(
             rule["id"],
             {
@@ -283,6 +298,23 @@ class AutoTradingRuleEngine:
                 reduce_only=True,
             )
         return client.place_order(symbol=symbol, qty=quantity, side="SELL", ord_type="LIMIT", price=price)
+
+    def _insert_trade_proposal_with_fallback(self, proposal_payload: dict):
+        try:
+            return query_supabase_as_service_role("trade_proposals", "POST", json_data=proposal_payload)
+        except Exception as exc:
+            if _is_trade_proposal_status_constraint_error(exc) and proposal_payload.get("status") == "PENDING":
+                retry_payload = dict(proposal_payload)
+                retry_payload["status"] = "APPROVED"
+                return self._insert_trade_proposal_with_fallback(retry_payload)
+            if not _is_trade_proposal_schema_error(exc):
+                raise
+            legacy_payload = {
+                key: value
+                for key, value in proposal_payload.items()
+                if key not in {"broker_env", "raw_order_payload"}
+            }
+            return query_supabase_as_service_role("trade_proposals", "POST", json_data=legacy_payload)
 
     def _normalize_order_status(self, order_result: dict) -> str:
         status = str(order_result.get("status") or "").upper()

@@ -61,6 +61,7 @@ python app.py
 - 기본 설정상 `SCHEDULER_RUN_IN_GATEWAY=false` 이므로, 스케줄러 운영은 `worker.py`를 별도로 띄우는 구조가 기준입니다.
 - 코인원 실주문은 현재 지정가 주문만 연결되어 있으며, 시장가 주문은 API 정책 검증 전까지 차단합니다.
 - 조건감시 자동/반자동 매도는 기본 설정상 `AUTO_TRADING_RULES_ENABLED=false`입니다. 실제 감시를 켜려면 `backend/.env`에서 이 값을 `true`로 바꾸고 `worker.py`를 실행해야 합니다.
+- 전체 사용자 미완료 주문 상태 동기화는 기본 설정상 `OPEN_ORDER_STATUS_SYNC_ENABLED=false`입니다. 켜면 worker가 KIS/코인원/바이낸스/바이낸스 선물의 `APPROVED`, `ORDERED`, `OPEN`, `PARTIALLY_FILLED`, `MODIFIED` 주문만 주기적으로 확인해 `trade_proposals` 상태를 보정합니다.
 
 ### 2. 프론트엔드
 
@@ -132,6 +133,7 @@ python src/run_pipeline_bundle.py \
 - `GET /api/chart/candles`
 - `GET /api/chart/orderbook`
 - `GET /api/chart/trades`
+- `GET /api/stocks/warnings`
 - `GET /api/symbol/lookup`
 - `GET /api/symbol/search`
 

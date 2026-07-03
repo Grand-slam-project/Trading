@@ -103,6 +103,9 @@ graph TD
 3. ML 자동화 스케줄러
 4. 홈 마켓 스냅샷 스케줄러
 5. 조건감시 자동/반자동 매도 스케줄러
+6. 전체 사용자 미완료 주문 상태 동기화 스케줄러
+
+미완료 주문 상태 동기화는 `OPEN_ORDER_STATUS_SYNC_ENABLED=true`일 때만 작동합니다. 대상은 `APPROVED`, `ORDERED`, `OPEN`, `PARTIALLY_FILLED`, `MODIFIED` 상태의 `trade_proposals`이며, KIS/코인원/바이낸스/바이낸스 선물 API에서 실제 상태를 조회해 `EXECUTED`, `CANCELED`, `FAILED`, `PARTIALLY_FILLED`, `ORDERED`로 보정합니다.
 
 운영 문서에서는 "스케줄러는 app.py에서 항상 돈다"라고 적으면 사실과 다릅니다.
 

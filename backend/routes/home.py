@@ -296,4 +296,20 @@ def get_dashboard_balance():
             "data": balance
         })
     except Exception as e:
+        # 모의투자(MOCK) 환경의 경우 외부 데모 서버 장애/오프라인 상태가 잦으므로,
+        # 에러를 노출하여 대시보드 로드를 막기보다 빈 잔고로 안전하게 복구하여 반환합니다.
+        if broker_env == "MOCK":
+            current_app.logger.warning(
+                f"[Dashboard][MOCK_FALLBACK] {exchange} MOCK balance query failed, fallback to empty: {str(e)}"
+            )
+            return jsonify({
+                "success": True,
+                "data": {
+                    "total_evaluation": 0.0,
+                    "available_cash": 0.0,
+                    "currency": "USD" if "BINANCE" in exchange else "KRW",
+                    "holdings": [],
+                    "warning": f"{exchange} 모의투자 서버 연결이 원활하지 않아 임시로 0으로 표시합니다."
+                }
+            })
         return jsonify(format_error_payload(e, "잔고 조회 실패", exchange=exchange)), 500
