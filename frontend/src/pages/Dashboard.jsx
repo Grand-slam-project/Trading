@@ -76,6 +76,69 @@ const formatNullableCurrency = (value, currency, displayCurrency = 'KRW', exchan
   return formatCurrency(value, currency, displayCurrency, exchangeRate)
 }
 
+const DASHBOARD_SUMMARY_CURRENCIES = ['KRW', 'USD', 'USDT']
+
+const normalizeSummaryCurrency = (currency, source = '') => {
+  const normalizedCurrency = String(currency || '').toUpperCase()
+  const normalizedSource = String(source || '').toUpperCase()
+
+  if (normalizedSource.includes('BINANCE')) return 'USDT'
+  if (DASHBOARD_SUMMARY_CURRENCIES.includes(normalizedCurrency)) return normalizedCurrency
+  return 'KRW'
+}
+
+const formatSummaryCurrency = (value, currency) => {
+  const numeric = toNumber(value)
+  if (currency === 'KRW') {
+    return `KRW ${Math.round(numeric).toLocaleString()}`
+  }
+  if (currency === 'USDT') {
+    return `USDT ${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
+  return `USD ${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+const getSummarySourceLabel = (source = '') => {
+  const normalized = String(source || '').toUpperCase()
+  if (normalized.includes('BINANCE_UM_FUTURES')) return '바이낸스 선물'
+  if (normalized.includes('BINANCE')) return '바이낸스 현물'
+  if (normalized.includes('COINONE')) return '코인원'
+  if (normalized.includes('TOSS')) return '토스'
+  if (normalized.includes('KIS')) return '한투'
+  return source || '-'
+}
+
+const createCurrencySourceMap = () => (
+  Object.fromEntries(DASHBOARD_SUMMARY_CURRENCIES.map((currency) => [currency, {}]))
+)
+
+const addCurrencySourceAmount = (sourceMap, currency, source, amount) => {
+  const normalizedCurrency = DASHBOARD_SUMMARY_CURRENCIES.includes(currency) ? currency : 'KRW'
+  const numeric = toNumber(amount)
+
+  const label = source || '-'
+  const current = sourceMap[normalizedCurrency][label] || { source: label, amount: 0 }
+  current.amount += numeric
+  sourceMap[normalizedCurrency][label] = current
+}
+
+const flattenCurrencySourceMap = (sourceMap) => (
+  Object.fromEntries(
+    DASHBOARD_SUMMARY_CURRENCIES.map((currency) => [
+      currency,
+      Object.values(sourceMap[currency] || {}).sort((a, b) => {
+        if (currency === 'KRW') {
+          const order = ['토스', '한투', '코인원']
+          const aIndex = order.indexOf(a.source)
+          const bIndex = order.indexOf(b.source)
+          if (aIndex !== bIndex) return (aIndex === -1 ? order.length : aIndex) - (bIndex === -1 ? order.length : bIndex)
+        }
+        return b.amount - a.amount
+      }),
+    ]),
+  )
+)
+
 const formatNativeCurrency = (value, currency) => {
   const numeric = Number(value)
   if (!Number.isFinite(numeric)) return '-'
@@ -257,6 +320,28 @@ const getHoldingEvaluationKrw = (holding = {}, exchangeRate = 1500) => {
   return currency === 'USD' || currency === 'USDT' ? rawValue * rate : rawValue
 }
 
+const getHoldingEvaluationNative = (holding = {}) => {
+  const directValue = toNumber(holding.eval_amount)
+  if (directValue > 0) return directValue
+  return toNumber(holding.current_price) * Math.abs(toNumber(holding.qty))
+}
+
+const getHoldingsTotalNative = (holdings = []) => (
+  holdings.reduce((sum, holding) => sum + getHoldingEvaluationNative(holding), 0)
+)
+
+const getHoldingProfitBasis = (holding = {}) => {
+  const qty = Math.abs(toNumber(holding.qty))
+  const avgPrice = toNumber(holding.avg_price)
+  const currentPrice = toNumber(holding.current_price)
+  const profit = toNumber(holding.profit)
+  const invested = avgPrice > 0
+    ? avgPrice * qty
+    : Math.max(0, currentPrice * qty - profit)
+
+  return { profit, invested }
+}
+
 const getPortfolioProfitRate = (accountBalance) => {
   if (!accountBalance) return 0
 
@@ -297,14 +382,58 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
   const cashUnavailableSources = []
   const cashBreakdown = {}
   const cashBreakdownEntries = []
+  const totalByCurrency = { KRW: 0, USD: 0, USDT: 0 }
+  const profitByCurrency = {
+    KRW: { profit: 0, invested: 0 },
+    USD: { profit: 0, invested: 0 },
+    USDT: { profit: 0, invested: 0 },
+  }
+  const totalBreakdownByCurrency = createCurrencySourceMap()
+  const cashBreakdownByCurrency = createCurrencySourceMap()
+
+  const addHoldingProfit = (currency, holding) => {
+    const normalizedCurrency = DASHBOARD_SUMMARY_CURRENCIES.includes(currency) ? currency : 'KRW'
+    const basis = getHoldingProfitBasis(holding)
+    profitByCurrency[normalizedCurrency].profit += basis.profit
+    profitByCurrency[normalizedCurrency].invested += basis.invested
+  }
 
   const holdings = filteredItems.flatMap((item) => {
     const exchange = item.exchange
+    const rawExchange = item.raw_exchange || item.exchange
+    const sourceLabel = getSummarySourceLabel(rawExchange || exchange)
     const rate = toNumber(item.exchange_rate) || representativeRate
     const itemCurrency = item.currency || 'KRW'
     const cashCurrency = item.available_cash_currency || itemCurrency
+    const summaryCurrency = normalizeSummaryCurrency(itemCurrency, rawExchange)
+    const itemHoldings = Array.isArray(item.holdings) ? item.holdings : []
+    const holdingCurrencies = new Set(
+      itemHoldings
+        .map((holding) => normalizeSummaryCurrency(holding.currency || itemCurrency, rawExchange))
+        .filter(Boolean),
+    )
+    const shouldSplitByHoldings = itemHoldings.length > 0 && (
+      String(rawExchange || '').toUpperCase().includes('TOSS') || holdingCurrencies.size > 1
+    )
 
     let itemEval = toNumber(item.total_evaluation)
+    if (shouldSplitByHoldings) {
+      itemHoldings.forEach((holding) => {
+        const holdingCurrency = normalizeSummaryCurrency(holding.currency || itemCurrency, rawExchange)
+        const holdingValue = getHoldingEvaluationNative(holding)
+        totalByCurrency[holdingCurrency] += holdingValue
+        addCurrencySourceAmount(totalBreakdownByCurrency, holdingCurrency, sourceLabel, holdingValue)
+        addHoldingProfit(holdingCurrency, holding)
+      })
+      if (itemHoldings.length === 0) {
+        addCurrencySourceAmount(totalBreakdownByCurrency, summaryCurrency, sourceLabel, 0)
+      }
+    } else {
+      const holdingsValue = getHoldingsTotalNative(itemHoldings)
+      totalByCurrency[summaryCurrency] += holdingsValue
+      addCurrencySourceAmount(totalBreakdownByCurrency, summaryCurrency, sourceLabel, holdingsValue)
+      itemHoldings.forEach((holding) => addHoldingProfit(summaryCurrency, holding))
+    }
 
     if (itemCurrency === 'USD' || itemCurrency === 'USDT') {
       itemEval = itemEval * rate
@@ -328,6 +457,9 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
     for (const entry of cashEntries) {
       cashBreakdown[entry.currency] = (cashBreakdown[entry.currency] || 0) + entry.amount
       cashBreakdownEntries.push(entry)
+      const entryCurrency = normalizeSummaryCurrency(entry.currency, rawExchange)
+      totalByCurrency[entryCurrency] += entry.amount
+      addCurrencySourceAmount(cashBreakdownByCurrency, entryCurrency, sourceLabel, entry.amount)
     }
 
     return (item.holdings || []).map((holding) => ({
@@ -341,6 +473,15 @@ const mergeAccountBalances = (items, showMockAssets = true) => {
 
   return {
     total_evaluation: totalEvaluationKrw,
+    total_by_currency: totalByCurrency,
+    profit_rate_by_currency: Object.fromEntries(
+      DASHBOARD_SUMMARY_CURRENCIES.map((currency) => {
+        const item = profitByCurrency[currency]
+        return [currency, item.invested > 0 ? (item.profit / item.invested) * 100 : 0]
+      }),
+    ),
+    total_breakdown_by_currency: flattenCurrencySourceMap(totalBreakdownByCurrency),
+    cash_breakdown_by_currency: flattenCurrencySourceMap(cashBreakdownByCurrency),
     available_cash: hasCashValue ? availableCashKrw : null,
     currency: 'KRW', // 통합 잔고는 항상 KRW 기준
     exchange_rate: representativeRate,
@@ -567,6 +708,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
 
   const [displayCurrency, setDisplayCurrency] = useState('KRW')
   const [isCashDetailModalOpen, setIsCashDetailModalOpen] = useState(false)
+  const [selectedSummaryCurrency, setSelectedSummaryCurrency] = useState(null)
 
   useEffect(() => {
     const nextTab = normalizeDashboardTab(searchParams.get('tab'))
@@ -940,6 +1082,21 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
     source: item.available_cash_source || '',
     supported: item.available_cash !== null && item.available_cash !== undefined && item.available_cash !== '',
   }))
+  const totalByCurrency = balance?.total_by_currency || {}
+  const profitRateByCurrency = balance?.profit_rate_by_currency || {}
+  const currencySummaryCards = DASHBOARD_SUMMARY_CURRENCIES.map((currency) => ({
+    currency,
+    label: `${currency} 평가 자산`,
+    value: totalByCurrency[currency] || 0,
+    profitRate: profitRateByCurrency[currency] || 0,
+  }))
+  const selectedSummaryDetail = selectedSummaryCurrency
+    ? {
+      currency: selectedSummaryCurrency,
+      totalEntries: balance?.total_breakdown_by_currency?.[selectedSummaryCurrency] || [],
+      cashEntries: balance?.cash_breakdown_by_currency?.[selectedSummaryCurrency] || [],
+    }
+    : null
 
   return (
     <div className="min-h-screen bg-obsidian-bg text-[#e2e2ec] font-inter">
@@ -1007,7 +1164,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                   </div>
 
                   {/* 원화/달러 보기 토글 스위치 */}
-                  <div className="inline-flex rounded-md bg-[#0f172a] p-1 border border-slate-700/80">
+                  <div className="hidden">
                     <button
                       onClick={() => setDisplayCurrency('USD')}
                       className={`px-3 py-1 text-xs font-bold rounded transition-all cursor-pointer ${displayCurrency === 'USD'
@@ -1034,6 +1191,31 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
 
               {/* 자산 요약 카드 */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {currencySummaryCards.map((card) => (
+                  <div key={card.currency} className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="text-xs font-bold text-slate-400">{card.label}</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummaryCurrency(card.currency)}
+                        className="rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
+                      >
+                        상세 정보
+                      </button>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-baseline gap-2">
+                      <span className="text-lg font-bold font-mono text-white">
+                      {balanceLoading ? '조회 중' : formatSummaryCurrency(card.value, card.currency)}
+                      </span>
+                      <span className={`text-xs font-bold font-mono ${card.profitRate >= 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                        ({formatSignedRate(card.profitRate)})
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="hidden">
                 <div className="bg-slate-surface border border-slate-700/80 rounded-lg p-5">
                   <span className="text-xs font-bold text-slate-400">총 평가 자산 ({balance?.currency || 'KRW'})</span>
                   <div className="text-xl font-bold font-mono text-white mt-1">
@@ -1244,7 +1426,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                           const isForeign = /[a-zA-Z]/.test(stock.symbol) && !/^[0-9a-zA-Z]{6,7}$/.test(stock.symbol) && !isCoinone
                           const stockCurrency = stock.currency || (isForeign ? 'USD' : 'KRW')
                           const exchangeRate = balance.exchange_rate || 1380
-                          const currentDisplayCurrency = isForeign ? displayCurrency : 'KRW'
+                          const isDomesticStock = String(stock.asset_type || 'STOCK').toUpperCase() === 'STOCK'
+                            && getHoldingMarketType(stock) === 'domestic'
+                          const currentDisplayCurrency = isDomesticStock ? 'KRW' : 'USD'
                           const profitRate = Number(stock.profit_rate)
 
                           return (
@@ -1346,6 +1530,57 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {selectedSummaryDetail ? (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 px-4 py-8 backdrop-blur-sm">
+              <div className="w-full max-w-3xl rounded-2xl border border-slate-700/80 bg-[#0b1220] p-5 shadow-2xl">
+                <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-3">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-300">Asset Detail</p>
+                    <h2 className="mt-1 text-base font-bold text-white">{selectedSummaryDetail.currency} 평가 자산 상세</h2>
+                    <p className="mt-1 text-xs text-slate-400">거래소별 평가금액과 같은 통화 기준 가용예수금을 함께 표시합니다.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSummaryCurrency(null)}
+                    className="rounded border border-slate-700 px-3 py-1.5 text-xs font-bold text-slate-300 transition hover:border-cyan-500/40 hover:text-white"
+                  >
+                    닫기
+                  </button>
+                </div>
+
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border border-slate-800 bg-[#0c0e15]/50 p-4">
+                    <h3 className="text-xs font-bold text-white">거래소별 평가자산</h3>
+                    <div className="mt-3 divide-y divide-slate-800/60">
+                      {selectedSummaryDetail.totalEntries.length > 0 ? selectedSummaryDetail.totalEntries.map((entry) => (
+                        <div key={`${selectedSummaryDetail.currency}-total-${entry.source}`} className="flex items-center justify-between gap-3 py-2 text-xs">
+                          <span className="font-bold text-slate-300">{entry.source}</span>
+                          <span className="font-mono font-bold text-white">{formatSummaryCurrency(entry.amount, selectedSummaryDetail.currency)}</span>
+                        </div>
+                      )) : (
+                        <p className="py-6 text-center text-xs text-slate-500">표시할 평가자산이 없습니다.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-800 bg-[#0c0e15]/50 p-4">
+                    <h3 className="text-xs font-bold text-white">가용예수금</h3>
+                    <div className="mt-3 divide-y divide-slate-800/60">
+                      {selectedSummaryDetail.cashEntries.length > 0 ? selectedSummaryDetail.cashEntries.map((entry) => (
+                        <div key={`${selectedSummaryDetail.currency}-cash-${entry.source}`} className="flex items-center justify-between gap-3 py-2 text-xs">
+                          <span className="font-bold text-slate-300">{entry.source}</span>
+                          <span className="font-mono font-bold text-cyan-300">{formatSummaryCurrency(entry.amount, selectedSummaryDetail.currency)}</span>
+                        </div>
+                      )) : (
+                        <p className="py-6 text-center text-xs text-slate-500">표시할 가용예수금이 없습니다.</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
