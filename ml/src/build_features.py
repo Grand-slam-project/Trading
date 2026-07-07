@@ -162,6 +162,14 @@ def load_optional_feature_source(path: Path, asset_type: str, default_columns: l
     return raw_df[keep_columns].drop_duplicates(subset=["symbol", "date_merge_key"], keep="last")
 
 
+def resolve_optional_feature_path(config: dict, key: str, default_relative_path: str) -> Path:
+    configured_path = (config.get("optional_features") or {}).get(key)
+    if configured_path:
+        path = Path(str(configured_path))
+        return path if path.is_absolute() else PROJECT_ROOT / path
+    return PROJECT_ROOT / default_relative_path
+
+
 def build_macro_features() -> pd.DataFrame:
     macro_path = PROJECT_ROOT / "ml" / "data" / "raw" / "macro_indices.csv"
     if not macro_path.exists():
@@ -214,7 +222,7 @@ def apply_optional_features(features: pd.DataFrame, config: dict) -> pd.DataFram
         "news_burst_zscore",
         "negative_keyword_ratio",
     ]
-    news_path = PROJECT_ROOT / "ml" / "data" / "raw" / "news_features.csv"
+    news_path = resolve_optional_feature_path(config, "news_features_path", "ml/data/raw/news_features.csv")
     news_df = load_optional_feature_source(news_path, asset_type, news_defaults)
     if not news_df.empty:
         merged = pd.merge(
@@ -246,7 +254,7 @@ def apply_optional_features(features: pd.DataFrame, config: dict) -> pd.DataFram
             "kimchi_premium",
             "leader_btc_dominance_proxy",
         ]
-        crypto_path = PROJECT_ROOT / "ml" / "data" / "raw" / "crypto_market_features.csv"
+        crypto_path = resolve_optional_feature_path(config, "crypto_market_features_path", "ml/data/raw/crypto_market_features.csv")
         crypto_df = load_optional_feature_source(crypto_path, asset_type, crypto_defaults)
         if not crypto_df.empty:
             features = pd.merge(features, crypto_df, on=["symbol", "date_merge_key"], how="left")
@@ -258,10 +266,40 @@ def apply_optional_features(features: pd.DataFrame, config: dict) -> pd.DataFram
             "turnover_ratio",
             "market_open_flag",
         ]
-        stock_path = PROJECT_ROOT / "ml" / "data" / "raw" / "stock_event_features.csv"
+        stock_path = resolve_optional_feature_path(config, "stock_event_features_path", "ml/data/raw/stock_event_features.csv")
         stock_df = load_optional_feature_source(stock_path, asset_type, stock_defaults)
         if not stock_df.empty:
             features = pd.merge(features, stock_df, on=["symbol", "date_merge_key"], how="left")
+
+        dart_defaults = [
+            "dart_disclosure_count_3d",
+            "dart_sentiment_sum_3d",
+            "dart_negative_count_3d",
+            "dart_positive_count_3d",
+            "dart_caution_count_3d",
+            "dart_disclosure_count_7d",
+            "dart_sentiment_sum_7d",
+            "dart_negative_count_7d",
+            "dart_positive_count_7d",
+            "dart_caution_count_7d",
+            "dart_disclosure_count_20d",
+            "dart_sentiment_sum_20d",
+            "dart_negative_count_20d",
+            "dart_positive_count_20d",
+            "dart_caution_count_20d",
+            "dart_ai_analyzed_count_20d",
+            "dart_contract_flag_20d",
+            "dart_financing_flag_20d",
+            "dart_shareholder_return_flag_20d",
+            "dart_risk_event_flag_20d",
+            "dart_earnings_flag_20d",
+        ]
+        dart_path_text = (config.get("optional_features") or {}).get("dart_features_path")
+        if dart_path_text:
+            dart_path = resolve_optional_feature_path(config, "dart_features_path", "ml/data/raw/dart_features.csv")
+            dart_df = load_optional_feature_source(dart_path, asset_type, dart_defaults)
+            if not dart_df.empty:
+                features = pd.merge(features, dart_df, on=["symbol", "date_merge_key"], how="left")
 
     return features
 
@@ -531,6 +569,13 @@ def build_features(candles: pd.DataFrame, config: dict, include_unlabeled: bool 
         "funding_rate", "open_interest", "open_interest_change_24h",
         "coinone_binance_spread", "kimchi_premium", "leader_btc_dominance_proxy",
         "warning_flag", "price_limit_proximity", "turnover_ratio", "market_open_flag",
+        "dart_disclosure_count_3d", "dart_sentiment_sum_3d", "dart_negative_count_3d",
+        "dart_positive_count_3d", "dart_caution_count_3d", "dart_disclosure_count_7d",
+        "dart_sentiment_sum_7d", "dart_negative_count_7d", "dart_positive_count_7d",
+        "dart_caution_count_7d", "dart_disclosure_count_20d", "dart_sentiment_sum_20d",
+        "dart_negative_count_20d", "dart_positive_count_20d", "dart_caution_count_20d",
+        "dart_ai_analyzed_count_20d", "dart_contract_flag_20d", "dart_financing_flag_20d",
+        "dart_shareholder_return_flag_20d", "dart_risk_event_flag_20d", "dart_earnings_flag_20d",
     ]
     for col in optional_ffill_columns:
         if col in features.columns:
@@ -559,6 +604,27 @@ def build_features(candles: pd.DataFrame, config: dict, include_unlabeled: bool 
         "price_limit_proximity",
         "turnover_ratio",
         "market_open_flag",
+        "dart_disclosure_count_3d",
+        "dart_sentiment_sum_3d",
+        "dart_negative_count_3d",
+        "dart_positive_count_3d",
+        "dart_caution_count_3d",
+        "dart_disclosure_count_7d",
+        "dart_sentiment_sum_7d",
+        "dart_negative_count_7d",
+        "dart_positive_count_7d",
+        "dart_caution_count_7d",
+        "dart_disclosure_count_20d",
+        "dart_sentiment_sum_20d",
+        "dart_negative_count_20d",
+        "dart_positive_count_20d",
+        "dart_caution_count_20d",
+        "dart_ai_analyzed_count_20d",
+        "dart_contract_flag_20d",
+        "dart_financing_flag_20d",
+        "dart_shareholder_return_flag_20d",
+        "dart_risk_event_flag_20d",
+        "dart_earnings_flag_20d",
         "stoch_k_14",
         "stoch_d_3",
         "obv_zscore_20",
