@@ -139,6 +139,30 @@ const flattenCurrencySourceMap = (sourceMap) => (
   )
 )
 
+const SUMMARY_DETAIL_SOURCE_ORDER = {
+  KRW: ['토스', '한투', '코인원'],
+  USD: ['토스'],
+  USDT: ['바이낸스 현물', '바이낸스 선물'],
+}
+
+const fillSummaryDetailEntries = (entries = [], currency = 'KRW') => {
+  const order = SUMMARY_DETAIL_SOURCE_ORDER[currency] || []
+  const bySource = new Map(entries.map((entry) => [entry.source, entry]))
+
+  order.forEach((source) => {
+    if (!bySource.has(source)) {
+      bySource.set(source, { source, amount: 0 })
+    }
+  })
+
+  return Array.from(bySource.values()).sort((a, b) => {
+    const aIndex = order.indexOf(a.source)
+    const bIndex = order.indexOf(b.source)
+    if (aIndex !== bIndex) return (aIndex === -1 ? order.length : aIndex) - (bIndex === -1 ? order.length : bIndex)
+    return b.amount - a.amount
+  })
+}
+
 const formatNativeCurrency = (value, currency) => {
   const numeric = Number(value)
   if (!Number.isFinite(numeric)) return '-'
@@ -179,13 +203,17 @@ const buildCashEntriesFromItem = (item = {}) => {
         : []
     )
 
-  return rawComponents
+  const entries = rawComponents
     .map((component) => {
       const currency = String(component?.currency || cashCurrency).toUpperCase()
       const amount = Number(
         component?.cash_buying_power
+        ?? component?.cashBuyingPower
+        ?? component?.buying_power
+        ?? component?.buyingPower
         ?? component?.amount
         ?? component?.available
+        ?? component?.availableCash
         ?? component?.free
         ?? component?.balance
       )
@@ -199,6 +227,24 @@ const buildCashEntriesFromItem = (item = {}) => {
       }
     })
     .filter(Boolean)
+
+  if (
+    entries.length === 0
+    && item.available_cash !== null
+    && item.available_cash !== undefined
+    && item.available_cash !== ''
+    && Number.isFinite(Number(item.available_cash))
+  ) {
+    return [{
+      currency: cashCurrency,
+      amount: Number(item.available_cash),
+      sourceLabel,
+      exchange: String(item.raw_exchange || item.exchange || '').toUpperCase(),
+      env: String(item.env || '').toUpperCase(),
+    }]
+  }
+
+  return entries
 }
 
 const parsePriceNumber = (value) => {
@@ -1210,8 +1256,8 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   const selectedSummaryDetail = selectedSummaryCurrency
     ? {
       currency: selectedSummaryCurrency,
-      totalEntries: balance?.total_breakdown_by_currency?.[selectedSummaryCurrency] || [],
-      cashEntries: balance?.cash_breakdown_by_currency?.[selectedSummaryCurrency] || [],
+      totalEntries: fillSummaryDetailEntries(balance?.total_breakdown_by_currency?.[selectedSummaryCurrency] || [], selectedSummaryCurrency),
+      cashEntries: fillSummaryDetailEntries(balance?.cash_breakdown_by_currency?.[selectedSummaryCurrency] || [], selectedSummaryCurrency),
     }
     : null
 

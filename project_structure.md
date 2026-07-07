@@ -156,6 +156,7 @@ frontend/
         ├── Dashboard.jsx
         ├── Home.jsx
         ├── Login.jsx
+        ├── MarketRankings.jsx
         ├── News.jsx
         ├── SearchNotFound.jsx
         ├── Settings.jsx
