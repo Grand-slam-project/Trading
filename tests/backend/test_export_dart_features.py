@@ -57,6 +57,21 @@ def test_build_daily_dart_features_uses_analysis_sentiment_and_category():
     assert row["dart_financing_flag"] == 1.0
 
 
+def test_build_daily_dart_features_skips_blank_rcept_no():
+    disclosures = [
+        {
+            "rcept_no": "   ",
+            "stock_code": "005930",
+            "report_nm": "단일판매ㆍ공급계약체결",
+            "rcept_dt": "2026-07-07",
+        }
+    ]
+
+    frame = build_daily_dart_features(disclosures, analyses=[])
+
+    assert frame.empty
+
+
 def test_build_shifted_dart_features_uses_only_prior_disclosures():
     feature_dates = pd.DataFrame(
         {
@@ -90,3 +105,42 @@ def test_build_shifted_dart_features_uses_only_prior_disclosures():
     assert rows[1]["dart_disclosure_count_3d"] == 1.0
     assert rows[2]["dart_disclosure_count_3d"] == 1.0
     assert rows[1]["dart_contract_flag_20d"] == 1.0
+
+
+def test_build_shifted_dart_features_carries_weekend_disclosure_to_next_feature_date():
+    feature_dates = pd.DataFrame(
+        {
+            "symbol": ["005930", "005930", "005930"],
+            "date": pd.to_datetime(["2026-07-03", "2026-07-06", "2026-07-07"]),
+        }
+    )
+    daily_features = pd.DataFrame(
+        {
+            "symbol": ["005930"],
+            "date": ["2026-07-04"],
+            "dart_disclosure_count": [1.0],
+            "dart_sentiment_score": [-1.0],
+            "dart_negative_count": [1.0],
+            "dart_positive_count": [0.0],
+            "dart_caution_count": [0.0],
+            "dart_info_count": [0.0],
+            "dart_ai_analyzed_count": [1.0],
+            "dart_contract_flag": [0.0],
+            "dart_financing_flag": [0.0],
+            "dart_shareholder_return_flag": [0.0],
+            "dart_risk_event_flag": [1.0],
+            "dart_earnings_flag": [0.0],
+        }
+    )
+
+    shifted = build_shifted_dart_features(feature_dates, daily_features)
+    rows = shifted.sort_values("date").to_dict("records")
+
+    assert rows[0]["dart_disclosure_count_3d"] == 0.0
+    assert rows[1]["dart_disclosure_count_3d"] == 1.0
+    assert rows[1]["dart_disclosure_count_7d"] == 1.0
+    assert rows[1]["dart_disclosure_count_20d"] == 1.0
+    assert rows[1]["dart_sentiment_sum_3d"] == -1.0
+    assert rows[1]["dart_negative_count_3d"] == 1.0
+    assert rows[1]["dart_risk_event_flag_20d"] == 1.0
+    assert rows[2]["dart_disclosure_count_3d"] == 1.0

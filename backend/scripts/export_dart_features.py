@@ -111,10 +111,10 @@ def build_daily_dart_features(disclosures: list[dict[str, Any]], analyses: list[
     for disclosure in disclosures:
         symbol = normalize_stock_code(disclosure.get("stock_code"))
         date = normalize_disclosure_date(disclosure.get("rcept_dt"))
-        if not symbol or not date:
+        rcept_no = str(disclosure.get("rcept_no") or "").strip()
+        if not symbol or not date or not rcept_no:
             continue
 
-        rcept_no = str(disclosure.get("rcept_no") or "").strip()
         analysis = analysis_by_rcept_no.get(rcept_no)
         sentiment = str((analysis or {}).get("sentiment") or "info").strip().lower()
         category = str((analysis or {}).get("category") or "")
@@ -166,7 +166,20 @@ def build_shifted_dart_features(feature_dates: pd.DataFrame, daily_features: pd.
     daily["symbol"] = daily["symbol"].map(normalize_stock_code)
     daily["date_key"] = pd.to_datetime(daily["date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    merged = base.merge(daily[["symbol", "date_key", *BASE_DART_COLUMNS]], on=["symbol", "date_key"], how="left")
+    timeline = (
+        pd.concat(
+            [
+                base[["symbol", "date", "date_key"]],
+                daily.assign(date=pd.to_datetime(daily["date"], errors="coerce"))[["symbol", "date", "date_key"]],
+            ],
+            ignore_index=True,
+        )
+        .dropna(subset=["date"])
+        .drop_duplicates(subset=["symbol", "date_key"])
+        .sort_values(["symbol", "date"])
+        .reset_index(drop=True)
+    )
+    merged = timeline.merge(daily[["symbol", "date_key", *BASE_DART_COLUMNS]], on=["symbol", "date_key"], how="left")
     merged[BASE_DART_COLUMNS] = merged[BASE_DART_COLUMNS].fillna(0.0)
 
     frames: list[pd.DataFrame] = []
@@ -190,6 +203,8 @@ def build_shifted_dart_features(feature_dates: pd.DataFrame, daily_features: pd.
     for column in OUTPUT_DART_COLUMNS:
         if column not in result.columns:
             result[column] = 0.0
+    result["date_key"] = pd.to_datetime(result["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    result = result.merge(base[["symbol", "date_key"]], on=["symbol", "date_key"], how="inner")
     result["date"] = pd.to_datetime(result["date"]).dt.strftime("%Y-%m-%d")
     return result[["symbol", "date", *OUTPUT_DART_COLUMNS]]
 
