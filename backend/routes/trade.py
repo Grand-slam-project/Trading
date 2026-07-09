@@ -1757,6 +1757,8 @@ def place_manual_order():
         if asset_type == "STOCK":
             market_country = determine_market_country(symbol)
 
+        auto_restart_on_partial_fill = data.get("auto_restart_on_partial_fill", True)
+
         try:
             rule_data = {
                 "user_id": user_id,
@@ -1773,6 +1775,7 @@ def place_manual_order():
                 "stop_loss_rate": stop_loss_rate,
                 "execution_mode": execution_mode,
                 "entry_order_proposal_id": proposal_id,
+                "auto_restart_on_partial_fill": auto_restart_on_partial_fill,
                 "status": "RUNNING"
             }
             # Supabase에 감시 조건 등록
@@ -4189,6 +4192,8 @@ def create_auto_trading_rule():
     if final_entry_price <= 0:
         return jsonify({"success": False, "message": "진입 가격(평균단가)을 특정할 수 없어 감시 등록이 불가능합니다."}), 400
 
+    auto_restart_on_partial_fill = req_data.get("auto_restart_on_partial_fill", True)
+
     rule_data = {
         "user_id": user_id,
         "exchange": exchange,
@@ -4202,6 +4207,7 @@ def create_auto_trading_rule():
         "target_profit_rate": target_profit_rate,
         "stop_loss_rate": stop_loss_rate,
         "execution_mode": execution_mode,
+        "auto_restart_on_partial_fill": auto_restart_on_partial_fill,
         "status": "RUNNING",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat()
