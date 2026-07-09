@@ -2692,6 +2692,36 @@ def cancel_replace_order():
         })
         return jsonify(format_error_payload(e, "취소 후 재주문 실패", exchange=exchange)), 500
 
+@trade_bp.route("/api/chart/quote", methods=["GET"])
+def get_quote():
+    """
+    경량 시세 조회 API.
+    전일대비 등락률(change_rate)을 차트 주기와 독립적으로 반환합니다.
+    기존 get_cached_change_rate 캐시를 재활용하여 거래소 추가 호출을 최소화합니다.
+    """
+    exchange = request.args.get("exchange")
+    symbol = request.args.get("symbol")
+    broker_env = request.args.get("broker_env", "REAL")
+
+    if not exchange or not symbol:
+        return jsonify({"success": False, "message": "exchange 및 symbol 파라미터가 필수적입니다."}), 400
+
+    is_us_stock = any(c.isalpha() for c in symbol)
+    if is_us_stock and exchange == "KIS":
+        exchange = "TOSS"
+
+    auth_header = request.headers.get("Authorization")
+    change_rate = get_cached_change_rate(exchange, symbol, broker_env, auth_header)
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "change_rate": change_rate,
+            "exchange": exchange,
+            "symbol": symbol,
+        }
+    })
+
 @trade_bp.route("/api/chart/candles", methods=["GET"])
 def get_chart_candles():
     """
