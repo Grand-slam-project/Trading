@@ -23,6 +23,7 @@ const INITIAL_MESSAGES = [
     role: 'assistant',
     text: '안녕하세요. AE 트레이딩 챗봇입니다. \n시세, 보유자산, 매매 제안 흐름을 도와드릴게요.',
     createdAt: new Date().toISOString(),
+    timelineOrder: 0,
   },
 ]
 
@@ -313,6 +314,7 @@ export default function ChatbotWidget({ enabled = true, isLoggedIn = false }) {
   const [proposalActionId, setProposalActionId] = useState('')
   const widgetInstanceId = useId()
   const messageIdSequenceRef = useRef(0)
+  const timelineOrderSequenceRef = useRef(0)
   const proposalActionIdRef = useRef('')
   const inputRef = useRef(null)
   const messagesEndRef = useRef(null)
@@ -352,7 +354,13 @@ export default function ChatbotWidget({ enabled = true, isLoggedIn = false }) {
         .order('created_at', { ascending: false })
         .limit(10)
 
-      if (!error && active) setPendingProposals(data || [])
+      if (!error && active) {
+        const proposals = [...(data || [])].reverse().map((proposal) => ({
+          ...proposal,
+          timelineOrder: ++timelineOrderSequenceRef.current,
+        }))
+        setPendingProposals(proposals)
+      }
 
       channel = supabase
         .channel(`chatbot-trade-proposals-${userId}`)
@@ -370,7 +378,13 @@ export default function ChatbotWidget({ enabled = true, isLoggedIn = false }) {
               setPendingProposals((items) => items.filter((item) => item.id !== payload.old?.id))
               return
             }
-            setPendingProposals((items) => mergePendingProposal(items, payload.new))
+            setPendingProposals((items) => {
+              const existing = items.find((item) => item.id === payload.new?.id)
+              return mergePendingProposal(items, {
+                ...payload.new,
+                timelineOrder: existing?.timelineOrder ?? ++timelineOrderSequenceRef.current,
+              })
+            })
           },
         )
         .subscribe()
@@ -517,6 +531,7 @@ export default function ChatbotWidget({ enabled = true, isLoggedIn = false }) {
         traceSteps,
         isStreaming: false,
         createdAt,
+        timelineOrder: ++timelineOrderSequenceRef.current,
       },
     ])
   }
@@ -534,6 +549,7 @@ export default function ChatbotWidget({ enabled = true, isLoggedIn = false }) {
         traceSteps: [],
         isStreaming: true,
         createdAt: new Date().toISOString(),
+        timelineOrder: ++timelineOrderSequenceRef.current,
       },
     ])
     return id

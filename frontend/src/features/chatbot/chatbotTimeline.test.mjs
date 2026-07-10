@@ -28,6 +28,23 @@ test('sorts messages and proposals together by creation time', () => {
   ])
 })
 
+test('keeps a received proposal after its request when client and server clocks differ', () => {
+  const timeline = buildChatbotTimeline(
+    [{
+      id: 'm1',
+      createdAt: '2026-07-10T02:00:00Z',
+      timelineOrder: 1,
+    }],
+    [{
+      id: 'p1',
+      created_at: '2026-07-10T01:00:00Z',
+      timelineOrder: 2,
+    }],
+  )
+
+  assert.deepEqual(timeline.map((item) => item.type), ['message', 'proposal'])
+})
+
 test('does not format a missing market price as zero', () => {
   assert.equal(formatChatbotProposalNumber(null), '-')
   assert.equal(formatChatbotProposalNumber(undefined), '-')
