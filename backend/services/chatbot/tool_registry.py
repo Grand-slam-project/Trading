@@ -621,6 +621,8 @@ def get_holdings(auth_header: str, message: str) -> dict:
 
 def _collect_precheck_blockers(precheck: dict, broker_env: str) -> list[str]:
     blockers = []
+    if precheck.get("balance_check_failed"):
+        blockers.append("주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다.")
     if precheck.get("is_market_closed"):
         blockers.append(precheck.get("market_status_message") or "현재 거래 가능 시간이 아닙니다.")
     if precheck.get("insufficient_cash"):
@@ -667,7 +669,7 @@ def create_trade_proposal(auth_header: str, arguments: dict) -> dict:
         quantity = float(values.get("quantity") or values.get("volume"))
     except (TypeError, ValueError) as error:
         raise ValueError("매매 제안 수량이 올바르지 않습니다.") from error
-    if quantity <= 0:
+    if not math.isfinite(quantity) or quantity <= 0:
         raise ValueError("매매 제안 수량은 0보다 커야 합니다.")
 
     price_value = values.get("price")
@@ -675,6 +677,8 @@ def create_trade_proposal(auth_header: str, arguments: dict) -> dict:
         price = float(price_value) if price_value not in (None, "") else None
     except (TypeError, ValueError) as error:
         raise ValueError("매매 제안 가격이 올바르지 않습니다.") from error
+    if price is not None and not math.isfinite(price):
+        raise ValueError("매매 제안 가격은 유한한 숫자여야 합니다.")
     if order_type == "LIMIT" and (price is None or price <= 0):
         raise ValueError("지정가 매매 제안에는 0보다 큰 가격이 필요합니다.")
 
@@ -684,14 +688,25 @@ def create_trade_proposal(auth_header: str, arguments: dict) -> dict:
     precheck = raw_order_payload.get("precheck") or {}
     if not isinstance(precheck, dict):
         precheck = {}
+    try:
+        reference_price = float(precheck.get("reference_price"))
+        estimated_amount_krw = float(precheck.get("estimated_amount_krw"))
+    except (TypeError, ValueError):
+        reference_price = 0.0
+        estimated_amount_krw = 0.0
     if (
         raw_order_payload.get("precheck_status") != "OK"
         or not precheck
-        or not precheck.get("reference_price")
-        or not precheck.get("estimated_amount_krw")
+        or not math.isfinite(reference_price)
+        or reference_price <= 0
+        or not math.isfinite(estimated_amount_krw)
+        or estimated_amount_krw <= 0
     ):
         raise ValueError("주문 사전검증을 통과한 제안만 생성할 수 있습니다.")
     blockers = _collect_precheck_blockers(precheck, broker_env)
+    relevant_balance = precheck.get("available_cash") if side == "BUY" else precheck.get("holding_qty")
+    if relevant_balance is None:
+        blockers.append("주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다.")
     if blockers:
         raise ValueError(" ".join(blockers))
 
@@ -1019,8 +1034,22 @@ def _run_chatbot_precheck(
         },
     )
     precheck = response.get("data") or {}
-    if not precheck.get("reference_price") or not precheck.get("estimated_amount_krw"):
+    try:
+        reference_price = float(precheck.get("reference_price"))
+        estimated_amount_krw = float(precheck.get("estimated_amount_krw"))
+    except (TypeError, ValueError):
+        reference_price = 0.0
+        estimated_amount_krw = 0.0
+    if (
+        not math.isfinite(reference_price)
+        or reference_price <= 0
+        or not math.isfinite(estimated_amount_krw)
+        or estimated_amount_krw <= 0
+    ):
         raise ValueError("현재가와 예상 주문금액을 확인하지 못했습니다.")
+    relevant_balance = precheck.get("available_cash") if side == "BUY" else precheck.get("holding_qty")
+    if precheck.get("balance_check_failed") or relevant_balance is None:
+        raise ValueError("주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다.")
     return precheck
 
 

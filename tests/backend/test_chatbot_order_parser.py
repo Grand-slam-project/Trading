@@ -61,6 +61,20 @@ def test_manwon_price_is_not_parsed_as_order_budget():
     assert intent.amount_krw is None
 
 
+def test_spaced_manwon_price_is_not_parsed_as_order_budget():
+    intent = parse_order_intent("삼성전자 1주 10만 원에 모의로 사줘")
+
+    assert intent.price == 100000
+    assert intent.amount_krw is None
+
+
+def test_spaced_korean_manwon_price_is_not_parsed_as_order_budget():
+    intent = parse_order_intent("삼성전자 1주 십만 원에 모의로 사줘")
+
+    assert intent.price == 100000
+    assert intent.amount_krw is None
+
+
 def test_korean_manwon_price_is_not_parsed_as_order_budget():
     intent = parse_order_intent("삼성전자 1주 십만원에 모의로 사줘")
 
@@ -70,6 +84,13 @@ def test_korean_manwon_price_is_not_parsed_as_order_budget():
 
 def test_manwon_budget_remains_an_order_amount():
     intent = parse_order_intent("삼성전자 10만원어치 모의로 사줘")
+
+    assert intent.amount_krw == 100000
+    assert intent.price is None
+
+
+def test_spaced_manwon_budget_remains_an_order_amount():
+    intent = parse_order_intent("삼성전자 10만 원어치 모의로 사줘")
 
     assert intent.amount_krw == 100000
     assert intent.price is None

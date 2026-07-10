@@ -15,6 +15,7 @@ function uniqueTexts(values) {
 }
 
 const APPROVAL_BLOCKER_FIELDS = [
+  'balance_check_failed',
   'insufficient_cash',
   'insufficient_holding',
   'is_market_closed',
@@ -39,6 +40,7 @@ export function buildProposalPrecheckSummary(proposal) {
   if (!precheck && !precheckStatus) return null
 
   const warnings = []
+  if (precheck?.balance_check_failed) warnings.push('주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다.')
   if (precheck?.insufficient_cash) warnings.push('예수금이 부족할 수 있습니다.')
   if (precheck?.insufficient_holding) warnings.push('보유 수량보다 많은 매도 주문입니다.')
   if (precheck?.is_market_closed) warnings.push(precheck.market_status_message || '현재는 거래 가능 시간이 아닙니다.')

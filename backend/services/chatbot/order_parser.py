@@ -96,7 +96,7 @@ KRW_UNIT_MULTIPLIERS = {
 
 
 def parse_order_intent(message: str) -> ParsedOrderIntent:
-    text = str(message or "").strip()
+    text = _normalize_krw_spacing(str(message or "").strip())
     if not text or any(pattern in text for pattern in ORDER_READ_PATTERNS):
         return ParsedOrderIntent(is_order_request=False)
     if (
@@ -125,6 +125,14 @@ def parse_order_intent(message: str) -> ParsedOrderIntent:
         order_type=order_type,
         broker_env=_detect_broker_env(text),
         sell_ratio=sell_ratio,
+    )
+
+
+def _normalize_krw_spacing(text: str) -> str:
+    return re.sub(
+        r"(\d+(?:\.\d+)?|[일한이삼사오육칠팔구십백천만]+)\s*(천|만)\s+원",
+        r"\1\2원",
+        text,
     )
 
 

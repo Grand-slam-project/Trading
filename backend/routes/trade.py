@@ -1,5 +1,6 @@
 import re
 import os
+import math
 import uuid
 import time
 import threading
@@ -601,6 +602,27 @@ def _claim_trade_proposal_for_execution(
         "rpc/claim_trade_proposal_for_execution",
         "POST",
         json_data={"p_proposal_id": proposal_id},
+    ) or []
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
+def _reject_pending_trade_proposal(
+    auth_header: str,
+    user_id: str,
+    proposal_id: str,
+) -> dict | None:
+    """PENDING 매매 제안만 조건부 갱신하여 승인과의 경쟁을 차단합니다."""
+    rows = query_supabase(
+        auth_header,
+        "trade_proposals",
+        "PATCH",
+        json_data={"status": "REJECTED"},
+        params={
+            "id": f"eq.{proposal_id}",
+            "user_id": f"eq.{user_id}",
+            "status": "eq.PENDING",
+        },
+        extra_headers={"Prefer": "return=representation"},
     ) or []
     return rows[0] if isinstance(rows, list) and rows else None
 
@@ -1208,8 +1230,8 @@ def _resolve_reference_price(exchange: str, symbol: str, order_type: str, price,
             resolved_price = float(price)
         except (TypeError, ValueError):
             raise ValueError("올바르지 않은 단가 포맷입니다.")
-        if resolved_price <= 0:
-            raise ValueError("주문 단가는 0보다 커야 합니다.")
+        if not math.isfinite(resolved_price) or resolved_price <= 0:
+            raise ValueError("주문 단가는 0보다 큰 유한한 숫자여야 합니다.")
         return resolved_price, "LIMIT_INPUT"
 
     if exchange not in ("TOSS", "KIS", "COINONE", "BINANCE", "BINANCE_UM_FUTURES") or client is None:
@@ -1217,7 +1239,7 @@ def _resolve_reference_price(exchange: str, symbol: str, order_type: str, price,
 
     price_info = client.get_price(symbol)
     resolved_price = float(price_info.get("current_price", 0) or 0)
-    if resolved_price <= 0:
+    if not math.isfinite(resolved_price) or resolved_price <= 0:
         raise ValueError("시장가 검증을 위한 현재가를 확인할 수 없습니다.")
     return resolved_price, "LIVE_PRICE"
 
@@ -1258,10 +1280,12 @@ def _extract_balance_snapshot(client, symbol: str) -> dict:
 
     try:
         available_cash = float(available_cash) if available_cash is not None else None
+        if available_cash is not None and not math.isfinite(available_cash):
+            available_cash = None
     except (TypeError, ValueError):
         available_cash = None
 
-    holding_qty = None
+    holding_qty = 0.0
     holding_value = None
     for item in balance.get("holdings", []) or []:
         holding_symbol = str(item.get("symbol", "")).upper()
@@ -1270,6 +1294,8 @@ def _extract_balance_snapshot(client, symbol: str) -> dict:
         try:
             holding_qty = float(item.get("qty", 0))
             current_price = float(item.get("current_price", 0))
+            if not math.isfinite(holding_qty) or not math.isfinite(current_price):
+                raise ValueError("보유자산 수치가 유한하지 않습니다.")
             holding_value = holding_qty * current_price if current_price > 0 else None
         except (TypeError, ValueError):
             holding_qty = None
@@ -1377,10 +1403,13 @@ def _run_binance_order_test(
 
 def _exceeds_real_order_limit(broker_env: str, estimated_amount_krw: float) -> bool:
     """REAL 주문에만 1회 주문 한도를 적용합니다."""
-    return (
-        str(broker_env or "").upper() == "REAL"
-        and float(estimated_amount_krw or 0) > REAL_ORDER_LIMIT_KRW
-    )
+    if str(broker_env or "").upper() != "REAL":
+        return False
+    try:
+        amount = float(estimated_amount_krw)
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(amount) or amount > REAL_ORDER_LIMIT_KRW
 
 
 def _build_precheck_payload(
@@ -1403,8 +1432,8 @@ def _build_precheck_payload(
         qty = float(quantity)
     except (TypeError, ValueError):
         raise ValueError("올바르지 않은 주문 수량 포맷입니다.")
-    if qty <= 0:
-        raise ValueError("주문 수량은 0보다 커야 합니다.")
+    if not math.isfinite(qty) or qty <= 0:
+        raise ValueError("주문 수량은 0보다 큰 유한한 숫자여야 합니다.")
 
     client = _build_exchange_client(exchange, broker_env, record, access_key, secret_key)
     reference_price, price_source = _resolve_reference_price(exchange, symbol, order_type, price, client)
@@ -1421,6 +1450,8 @@ def _build_precheck_payload(
             raise ValueError(f"{symbol} 바이낸스 선물에서 현재 허용되는 최대 레버리지는 {max_leverage}x입니다. 레버리지를 {max_leverage}x 이하로 낮춰 다시 시도하세요.")
         normalized_futures_options["quantity_filter"] = _validate_futures_order_quantity(client, symbol, order_type, qty)
     estimated_amount = reference_price * qty
+    if not math.isfinite(estimated_amount) or estimated_amount <= 0:
+        raise ValueError("예상 주문금액을 유한한 숫자로 계산할 수 없습니다.")
     required_margin = (
         estimated_amount / normalized_futures_options["leverage"]
         if normalized_futures_options
@@ -1431,41 +1462,47 @@ def _build_precheck_payload(
         exchange_rate = USD_KRW_FALLBACK
         try:
             live_exchange_rate = float(client.get_exchange_rate())
-            if live_exchange_rate > 0:
+            if math.isfinite(live_exchange_rate) and live_exchange_rate > 0:
                 exchange_rate = live_exchange_rate
         except Exception:
             pass
     elif exchange in ("BINANCE", "BINANCE_UM_FUTURES"):
         exchange_rate = USD_KRW_FALLBACK
     estimated_amount_krw = estimated_amount * exchange_rate
+    if not math.isfinite(estimated_amount_krw) or estimated_amount_krw <= 0:
+        raise ValueError("예상 원화 주문금액을 유한한 숫자로 계산할 수 없습니다.")
     balance_snapshot = _extract_balance_snapshot(client, symbol)
     available_cash = balance_snapshot["available_cash"]
     holding_qty = balance_snapshot["holding_qty"]
 
     exceeds_hard_cap = _exceeds_real_order_limit(broker_env, estimated_amount_krw)
     if exchange == "BINANCE_UM_FUTURES":
+        balance_check_failed = (
+            holding_qty is None
+            if normalized_futures_options["reduce_only"]
+            else available_cash is None
+        )
         insufficient_cash = (
-            broker_env == "REAL"
-            and not normalized_futures_options["reduce_only"]
+            not normalized_futures_options["reduce_only"]
             and available_cash is not None
             and required_margin > available_cash
         )
         insufficient_holding = (
-            broker_env == "REAL"
-            and normalized_futures_options["reduce_only"]
+            normalized_futures_options["reduce_only"]
             and holding_qty is not None
             and qty > abs(holding_qty)
         )
     else:
+        balance_check_failed = (
+            available_cash is None if action.upper() == "BUY" else holding_qty is None
+        )
         insufficient_cash = (
             action.upper() == "BUY"
-            and broker_env == "REAL"
             and available_cash is not None
             and required_margin > available_cash
         )
         insufficient_holding = (
             action.upper() == "SELL"
-            and broker_env == "REAL"
             and holding_qty is not None
             and qty > holding_qty
         )
@@ -1581,6 +1618,7 @@ def _build_precheck_payload(
         "available_cash": available_cash,
         "holding_qty": holding_qty,
         "holding_value": balance_snapshot["holding_value"],
+        "balance_check_failed": balance_check_failed,
         "insufficient_cash": insufficient_cash,
         "insufficient_holding": insufficient_holding,
         "exchange_order_test": exchange_order_test,
@@ -1624,6 +1662,11 @@ def precheck_manual_order():
         return jsonify({"success": False, "message": "올바르지 않은 주문 유형(order_type)입니다."}), 400
     if exchange == "COINONE" and order_type.upper() != "LIMIT":
         return jsonify({"success": False, "message": "코인원 주문 사전검증은 현재 지정가(LIMIT)만 지원합니다."}), 400
+    if broker_env == "REAL" and order_type.upper() == "MARKET":
+        return jsonify({
+            "success": False,
+            "message": "실거래 시장가 주문은 100,000원 하드캡을 보장할 수 없어 지원하지 않습니다. 지정가를 입력해 주세요.",
+        }), 400
 
     try:
         record, access_key, secret_key = _load_user_exchange_record(auth_header, user_id, exchange, broker_env)
@@ -1699,13 +1742,39 @@ def place_manual_order():
         return jsonify({"success": False, "message": "올바르지 않은 주문 유형(order_type)입니다."}), 400
     if exchange == "COINONE" and order_type.upper() != "LIMIT":
         return jsonify({"success": False, "message": "코인원 주문은 현재 지정가(LIMIT)만 지원합니다."}), 400
+    if broker_env == "REAL" and order_type.upper() == "MARKET":
+        return jsonify({
+            "success": False,
+            "message": "실거래 시장가 주문은 100,000원 하드캡을 보장할 수 없어 지원하지 않습니다. 지정가를 입력해 주세요.",
+        }), 400
 
     try:
         qty = float(quantity)
-        if qty <= 0:
-            return jsonify({"success": False, "message": "주문 수량은 0보다 커야 합니다."}), 400
-    except ValueError:
+        if not math.isfinite(qty) or qty <= 0:
+            return jsonify({"success": False, "message": "주문 수량은 0보다 큰 유한한 숫자여야 합니다."}), 400
+    except (TypeError, ValueError):
         return jsonify({"success": False, "message": "올바르지 않은 주문 수량 포맷입니다."}), 400
+
+    auto_exit_value = data.get("auto_exit", False)
+    if isinstance(auto_exit_value, bool):
+        auto_exit = auto_exit_value
+    elif str(auto_exit_value).strip().lower() in {"true", "1"}:
+        auto_exit = True
+    elif str(auto_exit_value).strip().lower() in {"false", "0", "", "none"}:
+        auto_exit = False
+    else:
+        return jsonify({"success": False, "message": "자동감시 사용 여부는 true 또는 false로 입력해 주세요."}), 400
+
+    target_profit_rate = 5.0
+    stop_loss_rate = -3.0
+    if auto_exit and action.upper() == "BUY":
+        try:
+            target_profit_rate = float(data.get("target_profit_rate", 5.0))
+            stop_loss_rate = float(data.get("stop_loss_rate", -3.0))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "익절·손절 비율은 유한한 숫자로 입력해 주세요."}), 400
+        if not math.isfinite(target_profit_rate) or not math.isfinite(stop_loss_rate):
+            return jsonify({"success": False, "message": "익절·손절 비율은 유한한 숫자로 입력해 주세요."}), 400
 
     try:
         record, access_key, secret_key = _load_user_exchange_record(auth_header, user_id, exchange, broker_env)
@@ -1768,6 +1837,12 @@ def place_manual_order():
 
     if precheck["insufficient_holding"]:
         return jsonify({"success": False, "message": "보유 수량을 초과하는 매도 주문입니다."}), 400
+
+    if precheck.get("balance_check_failed"):
+        return jsonify({
+            "success": False,
+            "message": "주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다. 계좌 연결 상태를 확인해 주세요.",
+        }), 400
 
     if approval_proposal:
         claimed = _claim_trade_proposal_for_execution(
@@ -1834,27 +1909,44 @@ def place_manual_order():
         return jsonify(format_error_payload(e, "주문 전송 실패", exchange=exchange)), 500
 
     # 5. 주문 체결 성공 후 자동 감시(Stop-loss, Take-profit) 바인딩
-    order_status_for_db = "EXECUTED" if _is_terminal_order_status(order_res.get("status")) else "APPROVED"
-    if exchange == "KIS":
-        order_status_for_db, kis_status_detail = _resolve_kis_submission_status(
-            client,
-            symbol=symbol,
-            side=action,
-            qty=qty,
-            previous_holding_qty=precheck.get("holding_qty"),
-            order_res=order_res,
+    if not isinstance(order_res, dict):
+        current_app.logger.error("거래소 주문 응답 형식이 올바르지 않습니다: exchange=%s", exchange)
+        order_res = {"status": "UNKNOWN", "raw": None}
+
+    try:
+        order_status_for_db = "EXECUTED" if _is_terminal_order_status(order_res.get("status")) else "APPROVED"
+        if exchange == "KIS":
+            order_status_for_db, kis_status_detail = _resolve_kis_submission_status(
+                client,
+                symbol=symbol,
+                side=action,
+                qty=qty,
+                previous_holding_qty=precheck.get("holding_qty"),
+                order_res=order_res,
+            )
+            order_res = {
+                **order_res,
+                "post_order_status_check": kis_status_detail,
+            }
+    except Exception:
+        current_app.logger.exception(
+            "주문 접수 후 상태 확인 실패: exchange=%s symbol=%s broker_env=%s",
+            exchange,
+            symbol,
+            broker_env,
         )
+        order_status_for_db = "APPROVED"
         order_res = {
             **order_res,
-            "post_order_status_check": kis_status_detail,
+            "post_order_status_check": {
+                "status": "UNKNOWN",
+                "message": "주문은 접수되었으며 상태 동기화가 필요합니다.",
+            },
         }
 
     proposal_id = str(approval_proposal["id"] if approval_proposal else uuid.uuid4())
     auto_exit_result = None
-    auto_exit = data.get("auto_exit", False)
     if auto_exit and action.upper() == "BUY":
-        target_profit_rate = float(data.get("target_profit_rate", 5.0))
-        stop_loss_rate = float(data.get("stop_loss_rate", -3.0))
         execution_mode = str(data.get("auto_exit_execution_mode") or "PROPOSAL").upper()
         if execution_mode not in ("PROPOSAL", "AUTO"):
             execution_mode = "PROPOSAL"
@@ -1978,10 +2070,12 @@ def reject_trade_proposal():
         proposal_id = str((request.json or {}).get("proposal_id") or "").strip()
         if not proposal_id:
             return jsonify({"success": False, "message": "proposal_id가 필요합니다."}), 400
-        proposal = _load_user_trade_proposal(auth_header, user_id, proposal_id)
-        if str(proposal.get("status") or "").upper() != "PENDING":
-            return jsonify({"success": False, "message": "대기 중인 매매 제안만 거절할 수 있습니다."}), 409
-        updated = _patch_trade_proposal(auth_header, proposal_id, {"status": "REJECTED"})
+        updated = _reject_pending_trade_proposal(auth_header, user_id, proposal_id)
+        if not updated:
+            return jsonify({
+                "success": False,
+                "message": "이미 승인·거절·실행 중이거나 찾을 수 없는 매매 제안입니다.",
+            }), 409
         return jsonify({"success": True, "data": updated, "message": "매매 제안을 거절했습니다."})
     except ValueError as error:
         return jsonify({"success": False, "message": str(error)}), 400

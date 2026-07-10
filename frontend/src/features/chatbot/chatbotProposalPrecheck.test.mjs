@@ -60,6 +60,12 @@ test('blocks approval when precheck status is missing or a blocker is true', () 
       precheck: { insufficient_permission: true },
     },
   }), true)
+  assert.equal(isProposalApprovalBlocked({
+    raw_order_payload: {
+      precheck_status: 'OK',
+      precheck: { balance_check_failed: true },
+    },
+  }), true)
 })
 
 test('advisory warnings alone do not block a validated proposal', () => {

@@ -100,11 +100,13 @@ erDiagram
 *   **RLS & Realtime**:
     *   Supabase Realtime 구독이 활성화되어 있어 백엔드 생성 즉시 프론트엔드로 승인 팝업 노출.
     *   `auth.uid() = user_id` 사용자만 읽기 및 관리 가능.
-*   **원자 승인 RPC**:
+*   **원자 승인·거절**:
     *   `claim_trade_proposal_for_execution(p_proposal_id uuid)`는 호출 사용자가 소유한 `PENDING` 제안만 `APPROVED`로 변경하고 `approved_at`을 기록합니다. 이미 선점된 제안은 반환되지 않습니다.
     *   함수는 `SECURITY INVOKER`로 실행하며 `authenticated`, `service_role`만 실행할 수 있습니다.
+    *   거절은 `id`, `user_id`, `status=PENDING` 조건을 포함한 단일 `UPDATE ... RETURNING` 요청으로 처리하여 승인 선점과 경쟁해도 상태를 덮어쓰지 않습니다.
 *   **챗봇 제안 생성 규칙**:
-    *   챗봇 경로의 `PENDING` 제안은 `raw_order_payload.precheck_status=OK`이고 현재가·예상 주문금액을 확인했으며 장 운영, 잔고·보유수량, 거래 권한, 지원 주문유형, 실거래 한도 검증에 차단 사유가 없을 때만 생성합니다.
+    *   챗봇 경로의 `PENDING` 제안은 `raw_order_payload.precheck_status=OK`이고 현재가·예상 주문금액과 주문 방향에 필요한 잔고·보유수량을 확인했으며 장 운영, 거래 권한, 지원 주문유형, 실거래 한도 검증에 차단 사유가 없을 때만 생성합니다.
+    *   MOCK은 10만 원 하드캡만 우회하고 잔고·보유수량 검증은 유지합니다. REAL 시장가는 슬리피지로 하드캡을 보장할 수 없어 차단합니다.
 *   **현재 구현 메모**:
     *   `COINONE` 실주문은 백엔드 `trade` 라우트에서 지정가(`LIMIT`) 매수/매도와 미체결 주문 취소까지 연결되어 있습니다.
     *   `COINONE` 시장가(`MARKET`) 주문은 API 정책 검증 전까지 프론트엔드와 백엔드에서 차단합니다.

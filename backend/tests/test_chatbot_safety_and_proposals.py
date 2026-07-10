@@ -17,6 +17,9 @@ def _valid_precheck(reference_price=800, estimated_amount_krw=8000, **overrides)
     precheck = {
         "reference_price": reference_price,
         "estimated_amount_krw": estimated_amount_krw,
+        "available_cash": 1000000,
+        "holding_qty": 100,
+        "balance_check_failed": False,
         "is_market_closed": False,
         "insufficient_cash": False,
         "insufficient_holding": False,
@@ -201,6 +204,35 @@ def test_create_trade_proposal_rejects_precheck_blocker(monkeypatch):
         )
 
 
+def test_create_trade_proposal_rejects_unverified_balance(monkeypatch):
+    monkeypatch.setattr(tool_registry, "get_user_id_from_header", lambda auth_header: ("user-1", "test"))
+    monkeypatch.setattr(tool_registry, "query_supabase", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("잔고 미검증 제안 insert 금지")
+    ))
+
+    with pytest.raises(ValueError, match="잔고"):
+        create_trade_proposal(
+            "Bearer test",
+            {
+                "exchange": "COINONE",
+                "asset_type": "CRYPTO",
+                "symbol": "XRP",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": 10,
+                "price": 800,
+                "broker_env": "MOCK",
+                "raw_order_payload": {
+                    "precheck_status": "OK",
+                    "precheck": _valid_precheck(
+                        available_cash=None,
+                        balance_check_failed=True,
+                    ),
+                },
+            },
+        )
+
+
 def test_approval_order_uses_server_side_pending_proposal_fields(monkeypatch):
     monkeypatch.setattr(
         "backend.routes.trade._load_user_trade_proposal",
@@ -244,12 +276,8 @@ def test_reject_endpoint_changes_only_pending_proposal(monkeypatch):
         lambda auth_header: ("user-1", "test"),
     )
     monkeypatch.setattr(
-        "backend.routes.trade._load_user_trade_proposal",
-        lambda auth_header, user_id, proposal_id: {"id": proposal_id, "status": "PENDING"},
-    )
-    monkeypatch.setattr(
-        "backend.routes.trade._patch_trade_proposal",
-        lambda auth_header, proposal_id, payload: {"id": proposal_id, **payload},
+        "backend.routes.trade._reject_pending_trade_proposal",
+        lambda auth_header, user_id, proposal_id: {"id": proposal_id, "status": "REJECTED"},
     )
 
     response = app.test_client().post(
@@ -635,6 +663,34 @@ def test_run_chatbot_precheck_requires_reference_price_and_estimated_amount(monk
     )
 
     with pytest.raises(ValueError, match="현재가와 예상 주문금액"):
+        tool_registry._run_chatbot_precheck(
+            auth_header="Bearer test",
+            exchange="COINONE",
+            symbol="XRP",
+            side="BUY",
+            order_type="LIMIT",
+            quantity=10,
+            price=800,
+            broker_env="MOCK",
+        )
+
+
+def test_run_chatbot_precheck_requires_relevant_balance(monkeypatch):
+    monkeypatch.setattr(
+        tool_registry,
+        "_post_internal",
+        lambda *args, **kwargs: {
+            "success": True,
+            "data": {
+                "reference_price": 800,
+                "estimated_amount_krw": 8000,
+                "available_cash": None,
+                "balance_check_failed": True,
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="잔고"):
         tool_registry._run_chatbot_precheck(
             auth_header="Bearer test",
             exchange="COINONE",
