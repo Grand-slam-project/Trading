@@ -590,6 +590,20 @@ def _load_user_trade_proposal(auth_header: str, user_id: str, proposal_id: str) 
     return records[0]
 
 
+def _claim_trade_proposal_for_execution(
+    auth_header: str,
+    proposal_id: str,
+) -> dict | None:
+    """PENDING 매매 제안을 원자적으로 승인 선점합니다."""
+    rows = query_supabase(
+        auth_header,
+        "rpc/claim_trade_proposal_for_execution",
+        "POST",
+        json_data={"p_proposal_id": proposal_id},
+    ) or []
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
 def _resolve_proposal_order_data(auth_header: str, user_id: str, data: dict) -> tuple[dict, dict | None]:
     """승인 카드 실행 시 PENDING 제안의 주문 필드를 서버 기준으로 고정합니다."""
     proposal_id = str(data.get("proposal_id") or "").strip()
@@ -1360,6 +1374,14 @@ def _run_binance_order_test(
     return None
 
 
+def _exceeds_real_order_limit(broker_env: str, estimated_amount_krw: float) -> bool:
+    """REAL 주문에만 1회 주문 한도를 적용합니다."""
+    return (
+        str(broker_env or "").upper() == "REAL"
+        and float(estimated_amount_krw or 0) > REAL_ORDER_LIMIT_KRW
+    )
+
+
 def _build_precheck_payload(
     exchange: str,
     symbol: str,
@@ -1408,7 +1430,7 @@ def _build_precheck_payload(
     available_cash = balance_snapshot["available_cash"]
     holding_qty = balance_snapshot["holding_qty"]
 
-    exceeds_hard_cap = False
+    exceeds_hard_cap = _exceeds_real_order_limit(broker_env, estimated_amount_krw)
     if exchange == "BINANCE_UM_FUTURES":
         insufficient_cash = (
             broker_env == "REAL"
@@ -1480,6 +1502,8 @@ def _build_precheck_payload(
     warnings = []
     if is_market_closed:
         warnings.append(market_status_message)
+    if exceeds_hard_cap:
+        warnings.append("실거래 1회 주문 한도 100,000원을 초과했습니다.")
 
     insufficient_permission = False
     permission_message = ""
@@ -1704,7 +1728,12 @@ def place_manual_order():
 
     order_price = precheck["reference_price"]
     total_amount = precheck["estimated_amount"]
-    total_amount_krw = precheck["estimated_amount_krw"]
+
+    if precheck.get("exceeds_real_order_limit"):
+        return jsonify({
+            "success": False,
+            "message": "실거래 1회 주문 한도 100,000원을 초과했습니다. 수량 또는 가격을 낮춰 주세요.",
+        }), 400
 
     if precheck.get("is_market_closed"):
         return jsonify({"success": False, "message": precheck.get("market_status_message") or "현재는 거래가 불가능한 시간(또는 휴장일)입니다."}), 400
@@ -1728,7 +1757,16 @@ def place_manual_order():
         return jsonify({"success": False, "message": "보유 수량을 초과하는 매도 주문입니다."}), 400
 
     if approval_proposal:
-        _patch_trade_proposal(auth_header, approval_proposal["id"], {"status": "APPROVED"})
+        claimed = _claim_trade_proposal_for_execution(
+            auth_header,
+            approval_proposal["id"],
+        )
+        if not claimed:
+            return jsonify({
+                "success": False,
+                "message": "이미 승인·거절·실행 중인 매매 제안입니다. 거래내역을 새로고침해 상태를 확인하세요.",
+            }), 409
+        approval_proposal = claimed
 
     # 4. 주문 실행
     client = None
