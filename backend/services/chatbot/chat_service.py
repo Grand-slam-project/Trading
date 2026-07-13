@@ -15,6 +15,7 @@ from backend.services.chatbot.prompt_registry import build_system_prompt
 from backend.services.chatbot.rag_service import ChatbotRAGService
 from backend.services.chatbot.tool_registry import (
     add_watchlist_item,
+    create_trade_proposal_from_message,
     get_asset_price,
     get_exchange_rate,
     get_holdings,
@@ -45,9 +46,14 @@ CONFIRMATION_PHRASES = (
     "진행해",
     "진행해줘",
     "응",
+    "맞아",
+    "맞습니다",
+    "맞어",
+    "네",
     "그래",
     "좋아",
     "해줘",
+    "생성해줘",
     "해봐",
     "시작해",
     "해죠",
@@ -322,7 +328,15 @@ class ChatbotService:
         normalized = str(text or "").replace(" ", "").strip()
         if not normalized:
             return False
-        return normalized in {phrase.replace(" ", "") for phrase in CONFIRMATION_PHRASES}
+        normalized_phrases = {phrase.replace(" ", "") for phrase in CONFIRMATION_PHRASES}
+        if normalized in normalized_phrases:
+            return True
+        prefix_phrases = {
+            phrase
+            for phrase in normalized_phrases
+            if len(phrase) >= 2 or phrase in {"응"}
+        }
+        return any(normalized.startswith(phrase) for phrase in prefix_phrases)
 
     def _build_missing_quantity_reply(
         self,
@@ -463,6 +477,24 @@ class ChatbotService:
             else:
                 completion = str(text or "").strip()
             return run_chatbot_tool(auth_header, f"{original_message} {completion}".strip())
+        if action == "trade_order_confirmation":
+            pending_payload = payload if isinstance(payload, dict) else {}
+            original_message = str(pending_payload.get("message") or "").strip()
+            if not original_message:
+                return {
+                    "reply": "확인할 매매 요청 내용을 찾지 못했습니다. 종목, 수량, 매수/매도 방향을 다시 입력해 주세요.",
+                    "data": {
+                        "source": "CHATBOT_ORDER_CONFIRMATION",
+                        "reason": "missing_pending_order_message",
+                    },
+                }
+            confirmation_text = str(text or "").strip()
+            merged_message = (
+                f"{original_message} {confirmation_text}"
+                if confirmation_text
+                else original_message
+            )
+            return create_trade_proposal_from_message(auth_header, merged_message)
         return None
 
     @staticmethod
