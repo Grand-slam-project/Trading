@@ -54,6 +54,155 @@ def test_extract_symbol_query_keeps_stock_and_crypto_alias_names():
     assert tool_registry._extract_symbol_query("테더 환율 알려줘") == "USDT"
 
 
+def test_run_chatbot_tool_asks_coin_symbol_for_category_only_price_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "코인 시세 알려줘")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_crypto_symbol"
+    assert "어떤 코인" in result["reply"]
+    assert "BTC" in result["reply"]
+
+
+def test_run_chatbot_tool_asks_symbol_for_bare_disclosure_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "공시 보여줘")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_disclosure_symbol"
+    assert "어떤 종목" in result["reply"]
+
+
+def test_run_chatbot_tool_asks_news_target_for_bare_news_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "뉴스 알려줘")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_news_target"
+    assert "어떤 종목" in result["reply"]
+
+
+def test_run_chatbot_tool_asks_coin_symbol_for_category_only_outlook_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "코인 전망 어때")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_crypto_symbol"
+    assert "어떤 코인" in result["reply"]
+    assert "BTC" in result["reply"]
+
+
+def test_run_chatbot_tool_asks_symbol_for_category_only_stock_outlook_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "주식 전망 어때")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_outlook_symbol"
+    assert "어떤 종목" in result["reply"]
+
+
+def test_run_chatbot_tool_asks_news_target_for_category_only_stock_news_query():
+    result = tool_registry.run_chatbot_tool("Bearer test", "주식 뉴스 보여줘")
+
+    assert result["data"]["source"] == "CATEGORY_CLARIFICATION"
+    assert result["data"]["reason"] == "missing_news_target"
+    assert "어떤 종목" in result["reply"]
+
+
+def test_run_chatbot_tool_combines_price_and_news(monkeypatch):
+    calls = []
+    message = "삼성전자 현재가랑 최신 뉴스 알려줘"
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_price",
+        lambda auth, msg: calls.append(("price", msg)) or {"reply": "가격 응답", "data": {"source": "ASSET_PRICE"}},
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "search_web",
+        lambda auth, msg: calls.append(("web", msg)) or {"reply": "뉴스 응답", "data": {"source": "NEWS_DB"}},
+    )
+
+    result = tool_registry.run_chatbot_tool("Bearer test", message)
+
+    assert calls == [("price", message), ("web", message)]
+    assert result["data"]["source"] == "COMPOUND_INFO"
+    assert result["data"]["components"] == ["ASSET_PRICE", "NEWS_DB"]
+    assert "가격 응답" in result["reply"]
+    assert "뉴스 응답" in result["reply"]
+
+
+def test_run_chatbot_tool_combines_price_and_disclosure(monkeypatch):
+    calls = []
+    message = "삼성전자 가격이랑 공시 요약해줘"
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_price",
+        lambda auth, msg: calls.append(("price", msg)) or {"reply": "가격 응답", "data": {"source": "ASSET_PRICE"}},
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "search_web",
+        lambda auth, msg: calls.append(("web", msg)) or {"reply": "공시 응답", "data": {"source": "DISCLOSURE_DB"}},
+    )
+
+    result = tool_registry.run_chatbot_tool("Bearer test", message)
+
+    assert calls == [("price", message), ("web", message)]
+    assert result["data"]["source"] == "COMPOUND_INFO"
+    assert result["data"]["components"] == ["ASSET_PRICE", "DISCLOSURE_DB"]
+    assert "가격 응답" in result["reply"]
+    assert "공시 응답" in result["reply"]
+
+
+def test_run_chatbot_tool_combines_price_and_outlook(monkeypatch):
+    calls = []
+    message = "테슬라 가격 어때 전망도 알려줘"
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_price",
+        lambda auth, msg: calls.append(("price", msg)) or {"reply": "가격 응답", "data": {"source": "ASSET_PRICE"}},
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_outlook",
+        lambda auth, msg: calls.append(("outlook", msg)) or {"reply": "전망 응답", "data": {"source": "ASSET_OUTLOOK"}},
+    )
+
+    result = tool_registry.run_chatbot_tool("Bearer test", message)
+
+    assert calls == [("price", message), ("outlook", message)]
+    assert result["data"]["source"] == "COMPOUND_INFO"
+    assert result["data"]["components"] == ["ASSET_PRICE", "ASSET_OUTLOOK"]
+    assert "가격 응답" in result["reply"]
+    assert "전망 응답" in result["reply"]
+
+
+def test_compound_info_does_not_intercept_order_with_news(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_price",
+        lambda auth, msg: (_ for _ in ()).throw(AssertionError("주문 문구는 복합 현재가 라우팅 금지")),
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "search_web",
+        lambda auth, msg: (_ for _ in ()).throw(AssertionError("주문 문구는 복합 뉴스 라우팅 금지")),
+    )
+
+    def fake_create_trade_proposal_from_message(auth_header, message, intent=None):
+        calls.append((auth_header, message, intent))
+        return {"reply": "주문 흐름", "data": {"source": "ORDER_FLOW"}}
+
+    monkeypatch.setattr(tool_registry, "_is_plain_order_requiring_confirmation", lambda message, intent: False)
+    monkeypatch.setattr(tool_registry, "create_trade_proposal_from_message", fake_create_trade_proposal_from_message)
+
+    result = tool_registry.run_chatbot_tool("Bearer test", "삼성전자 1주 사줘 그리고 뉴스 알려줘")
+
+    assert result["data"]["source"] == "ORDER_FLOW"
+    assert len(calls) == 1
+
+
 def test_extract_symbol_query_uses_ml_training_universe_symbols():
     assert tool_registry._extract_symbol_query("XRPUSDT 관심종목 추가") == "XRP"
     assert tool_registry._extract_symbol_query("SUIUSDT 뉴스 보여줘") == "SUI"

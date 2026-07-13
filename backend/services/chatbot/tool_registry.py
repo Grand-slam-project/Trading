@@ -132,6 +132,8 @@ KOREAN_MONEY_NUMBER_PATTERN = re.compile(
     r"[일한이삼사오육칠팔구십백천만]+\s*(?:만원|천원|원|만)"
 )
 
+SYMBOL_QUERY_NAME_PRESERVE_ALIASES = {"삼성전기"}
+
 
 class SymbolDisambiguationError(ValueError):
     """종목명이 여러 후보로 해석될 때 챗봇 선택 버튼 생성을 위해 사용합니다."""
@@ -350,6 +352,8 @@ def _extract_symbol_query(text: str) -> str:
     if not candidates:
         return ""
     candidate = candidates[0]
+    if candidate in SYMBOL_QUERY_NAME_PRESERVE_ALIASES:
+        return candidate
     return normalize_symbol_alias(candidate)
 
 
@@ -399,7 +403,7 @@ def _detect_exchange(text: str) -> str | None:
 def _default_exchange_for_asset(asset_type: str, market: str) -> str:
     if str(asset_type or "").upper() == "CRYPTO":
         return "COINONE"
-    return "TOSS" if str(market or "").upper() == "US" else "KIS"
+    return "TOSS"
 
 
 def _detect_env(text: str) -> str | None:
@@ -414,15 +418,13 @@ def _is_plain_order_requiring_confirmation(message: str, parsed: ParsedOrderInte
     """
     종목/방향/수량만 있는 첫 주문은 바로 사전검증하지 않고 사용자 확인을 먼저 받습니다.
     """
-    if not _detect_exchange(message):
+    if not parsed.symbol_query:
         return False
     if parsed.quantity is None or parsed.quantity <= 0:
         return False
     if parsed.price is not None or parsed.amount_krw is not None or parsed.sell_ratio is not None:
         return False
     if parsed.broker_env:
-        return False
-    if _detect_exchange(message):
         return False
     return True
 
@@ -662,8 +664,6 @@ def _is_missing_optional_account_error(error: Exception) -> bool:
         "API 키",
         "API키",
         "API key",
-        "credentials",
-        "credential",
     ]
     return any(marker in text for marker in missing_markers)
 
@@ -1085,9 +1085,6 @@ def create_trade_proposal(auth_header: str, arguments: dict) -> dict:
         raise ValueError("코인원 매매 제안은 지정가 주문만 지원합니다.")
     if broker_env not in {"MOCK", "REAL"}:
         raise ValueError("broker_env는 MOCK 또는 REAL이어야 합니다.")
-    if broker_env == "MOCK" and not _exchange_has_mock_env(exchange):
-        raise ValueError(f"{exchange}는 모의 계좌 환경을 지원하지 않습니다.")
-
     try:
         quantity = float(values.get("quantity") or values.get("volume"))
     except (TypeError, ValueError) as error:
@@ -1132,6 +1129,8 @@ def create_trade_proposal(auth_header: str, arguments: dict) -> dict:
         blockers.append("주문에 필요한 잔고 또는 보유수량을 확인하지 못했습니다.")
     if blockers:
         raise ValueError(" ".join(blockers))
+    if broker_env == "MOCK" and not _exchange_has_mock_env(exchange):
+        raise ValueError(f"{exchange}는 모의 계좌 환경을 지원하지 않습니다.")
 
     market_country = str(values.get("market_country") or ("US" if exchange == "TOSS" and asset_type == "STOCK" else "KR")).upper()
     currency = str(values.get("currency") or ("USD" if market_country == "US" or exchange in {"BINANCE", "BINANCE_UM_FUTURES"} else "KRW")).upper()
@@ -1177,10 +1176,18 @@ def create_trade_proposal_from_message(auth_header: str, message: str, intent: P
     asset_label = f"{display_name}({symbol})" if display_name and display_name.upper() != symbol else symbol
     asset_type = str(symbol_data.get("asset_type") or "STOCK").upper()
     market = str(symbol_data.get("market") or "").upper()
-    exchange = _detect_exchange(message)
-    if not exchange:
-        return _build_missing_exchange_result(symbol, parsed.side)
+    explicit_exchange = _detect_exchange(message)
+    exchange = explicit_exchange or _default_exchange_for_asset(asset_type, market)
     price = parsed.price
+    if (
+        not explicit_exchange
+        and asset_type == "STOCK"
+        and parsed.quantity is not None
+        and price is None
+        and not parsed.amount_krw
+        and not parsed.sell_ratio
+    ):
+        return _build_missing_exchange_result(symbol, parsed.side)
     if parsed.broker_env:
         broker_env = parsed.broker_env
     elif _exchange_has_mock_env(exchange):
@@ -1197,13 +1204,7 @@ def create_trade_proposal_from_message(auth_header: str, message: str, intent: P
             },
         }
     else:
-        broker_env = "REAL"
-
-    if broker_env == "MOCK" and not _exchange_has_mock_env(exchange):
-        return _build_unsupported_broker_env_result(exchange, broker_env, symbol)
-
-    if price is None and exchange in {"TOSS", "COINONE"}:
-        return _build_missing_order_price_result(symbol, parsed.side, exchange, broker_env)
+        broker_env = "MOCK" if asset_type == "CRYPTO" else "REAL"
 
     if exchange == "COINONE" and parsed.order_type == "MARKET":
         return {
@@ -1218,6 +1219,17 @@ def create_trade_proposal_from_message(auth_header: str, message: str, intent: P
                 "symbol": symbol,
             },
         }
+
+    if (
+        not explicit_exchange
+        and exchange == "COINONE"
+        and broker_env == "MOCK"
+        and price is not None
+    ):
+        exchange = "BINANCE"
+
+    if broker_env == "MOCK" and not _exchange_has_mock_env(exchange):
+        return _build_unsupported_broker_env_result(exchange, broker_env, symbol)
 
     if price is None and (parsed.amount_krw or parsed.sell_ratio):
         price = _lookup_current_price(auth_header, exchange, symbol, broker_env)
@@ -1296,6 +1308,9 @@ def create_trade_proposal_from_message(auth_header: str, message: str, intent: P
                 "side": parsed.side,
             },
         }
+
+    if price is None and exchange in {"TOSS", "COINONE"}:
+        return _build_missing_order_price_result(symbol, parsed.side, exchange, broker_env)
 
     market_country = "KR" if asset_type == "CRYPTO" else (market or "KR")
     currency = "KRW" if asset_type == "CRYPTO" or market_country != "US" else "USD"
@@ -1590,22 +1605,25 @@ def _lookup_holding_quantity(
 ) -> float:
     summary = get_portfolio_summary(auth_header, message)
     summaries = (summary.get("data") or {}).get("summaries") or []
+    fallback_quantity = 0.0
     for item in summaries:
         if exchange and str(item.get("exchange") or "").upper() != exchange:
-            continue
-        if broker_env and str(item.get("env") or "").upper() != broker_env:
             continue
         for holding in item.get("holdings") or []:
             holding_symbol = str(holding.get("symbol") or holding.get("currency") or "").upper()
             if holding_symbol != symbol:
                 continue
-            return _to_float(
+            quantity = _to_float(
                 holding.get("qty")
                 or holding.get("quantity")
                 or holding.get("balance")
                 or holding.get("available_qty")
             )
-    return 0.0
+            if broker_env and str(item.get("env") or "").upper() != broker_env:
+                fallback_quantity = fallback_quantity or quantity
+                continue
+            return quantity
+    return fallback_quantity
 
 
 def _quantity_from_ratio(holding_quantity: float, ratio: float, asset_type: str) -> float:
@@ -1865,7 +1883,6 @@ def search_web(auth_header: str, message: str) -> dict:
 
 
 def get_asset_outlook(auth_header: str, message: str) -> dict:
-    user_id, _ = get_user_id_from_header(auth_header)
     symbol_query = _extract_symbol_query(message)
     if not symbol_query:
         return {
@@ -1896,6 +1913,7 @@ def get_asset_outlook(auth_header: str, message: str) -> dict:
     if market:
         context_parts.append(market)
 
+    user_id, _ = get_user_id_from_header(auth_header)
     result = ChatbotWebFallbackSearchService().search(
         auth_header=auth_header,
         user_id=user_id,
@@ -1955,6 +1973,119 @@ def _is_asset_price_request(text: str) -> bool:
     return bool(_extract_symbol_query(value))
 
 
+def _has_concrete_symbol_query(text: str) -> bool:
+    symbol_query = _extract_symbol_query(text)
+    if not symbol_query:
+        return False
+    category_only_tokens = {
+        "코인",
+        "가상자산",
+        "암호화폐",
+        "크립토",
+        "주식",
+        "국내주식",
+        "미국주식",
+        "해외주식",
+        "종목",
+        "시장",
+    }
+    return symbol_query not in category_only_tokens
+
+
+def _build_category_clarification_result(message: str) -> dict | None:
+    text = str(message or "").strip()
+    if not text or _has_concrete_symbol_query(text):
+        return None
+
+    price_keywords = ["현재가", "시세", "얼마", "가격", "주가"]
+    crypto_category_keywords = ["코인", "가상자산", "암호화폐", "크립토"]
+    if any(keyword in text for keyword in crypto_category_keywords) and any(keyword in text for keyword in price_keywords):
+        return {
+            "reply": "어떤 코인의 시세를 확인할까요?\n예: BTC 시세 알려줘, 비트코인 현재가 보여줘",
+            "data": {
+                "source": "CATEGORY_CLARIFICATION",
+                "reason": "missing_crypto_symbol",
+            },
+        }
+
+    if "공시" in text:
+        return {
+            "reply": "어떤 종목의 공시를 확인할까요?\n예: 삼성전자 공시 보여줘, AAPL 공시 알려줘",
+            "data": {
+                "source": "CATEGORY_CLARIFICATION",
+                "reason": "missing_disclosure_symbol",
+            },
+        }
+
+    if "뉴스" in text:
+        return {
+            "reply": "어떤 종목의 뉴스를 확인할까요?\n예: 삼성전자 뉴스 알려줘, 비트코인 최신 뉴스 보여줘",
+            "data": {
+                "source": "CATEGORY_CLARIFICATION",
+                "reason": "missing_news_target",
+            },
+        }
+
+    if _is_asset_outlook_request(text):
+        if any(keyword in text for keyword in crypto_category_keywords):
+            return {
+                "reply": "어떤 코인의 전망을 확인할까요?\n예: BTC 전망 어때, 비트코인 분석해줘",
+                "data": {
+                    "source": "CATEGORY_CLARIFICATION",
+                    "reason": "missing_crypto_symbol",
+                },
+            }
+        return {
+            "reply": "어떤 종목의 전망을 확인할까요?\n예: 삼성전자 전망 어때, AAPL 분석해줘",
+            "data": {
+                "source": "CATEGORY_CLARIFICATION",
+                "reason": "missing_outlook_symbol",
+            },
+        }
+
+    return None
+
+
+def _run_compound_info_tool(auth_header: str, message: str) -> dict | None:
+    text = str(message or "")
+    if not _is_asset_price_request(text):
+        return None
+
+    secondary_tool_name = None
+    secondary_tool_func = None
+    if _is_asset_outlook_request(text):
+        secondary_tool_name = "get_asset_outlook"
+        secondary_tool_func = get_asset_outlook
+    elif _is_web_search_request(text):
+        secondary_tool_name = "search_web"
+        secondary_tool_func = search_web
+
+    if not secondary_tool_func:
+        return None
+
+    enforce_tool_safety("get_asset_price", {"message": text})
+    price_result = get_asset_price(auth_header, text)
+    enforce_tool_safety(secondary_tool_name, {"message": text})
+    secondary_result = secondary_tool_func(auth_header, text)
+    price_data = price_result.get("data") or {}
+    secondary_data = secondary_result.get("data") or {}
+    price_source = price_data.get("source") or "ASSET_PRICE"
+    secondary_source = secondary_data.get("source") or secondary_tool_name
+
+    return {
+        "reply": (
+            f"현재가\n{price_result.get('reply') or ''}"
+            f"\n\n추가 확인\n{secondary_result.get('reply') or ''}"
+        ),
+        "data": {
+            "source": "COMPOUND_INFO",
+            "components": [price_source, secondary_source],
+            "price": price_data,
+            "secondary": secondary_data,
+        },
+    }
+
+
 def run_chatbot_tool(auth_header: str | None, message: str) -> dict | None:
     if not auth_header:
         return None
@@ -1982,6 +2113,14 @@ def run_chatbot_tool(auth_header: str | None, message: str) -> dict | None:
                 broker_env,
             )
         return create_trade_proposal_from_message(auth_header, text, order_intent)
+
+    clarification = _build_category_clarification_result(text)
+    if clarification:
+        return clarification
+
+    compound_result = _run_compound_info_tool(auth_header, text)
+    if compound_result:
+        return compound_result
 
     def guarded(tool_name: str, tool_func):
         enforce_tool_safety(tool_name, {"message": text})

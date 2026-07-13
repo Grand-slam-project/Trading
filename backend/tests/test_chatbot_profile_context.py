@@ -50,6 +50,80 @@ class FakeRAGService:
         return "", []
 
 
+class FakeToolCallingLLMClient:
+    def __init__(self):
+        self.synthesis_calls = []
+
+    def generate_reply(self, **kwargs):
+        return {
+            "reply": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_asset_price",
+                        "arguments": '{"query":"AAPL"}',
+                    }
+                }
+            ],
+            "model": "fake",
+            "usage": {},
+        }
+
+    def synthesize_tool_result_reply(self, **kwargs):
+        self.synthesis_calls.append(kwargs)
+        return {
+            "reply": "AAPL은 현재가와 등락률을 함께 보면 단기 변동성은 낮지만 확인이 필요합니다."
+        }
+
+
+class FailingToolSynthesisLLMClient(FakeToolCallingLLMClient):
+    def synthesize_tool_result_reply(self, **kwargs):
+        self.synthesis_calls.append(kwargs)
+        raise RuntimeError("provider down")
+
+
+def build_openai_tool_call_service(monkeypatch, llm_client):
+    monkeypatch.setattr(
+        "backend.services.chatbot.chat_service.run_chatbot_tool",
+        lambda auth_header, text: None,
+    )
+
+    service = ChatbotService()
+    service.llm_client = llm_client
+    service.rag_service = FakeRAGService()
+    service._run_llm_tool_call = lambda auth_header, tool_call, fallback_text: {
+        "reply": "AAPL 현재가는 $210.50입니다.",
+        "actions": [{"type": "navigate", "label": "AAPL 보기", "to": "/asset/STOCK/AAPL"}],
+        "data": {"source": "ASSET_PRICE", "symbol": "AAPL", "current_price": 210.5},
+    }
+    return service
+
+
+def test_reply_synthesizes_openai_tool_result_and_preserves_metadata(monkeypatch):
+    fake_llm = FakeToolCallingLLMClient()
+    service = build_openai_tool_call_service(monkeypatch, fake_llm)
+
+    result = service.reply("AAPL 현재가 알려줘", user_id="user-1", auth_header="Bearer test")
+
+    assert result["reply"] == "AAPL은 현재가와 등락률을 함께 보면 단기 변동성은 낮지만 확인이 필요합니다."
+    assert result["actions"] == [{"type": "navigate", "label": "AAPL 보기", "to": "/asset/STOCK/AAPL"}]
+    assert result["meta"]["tool_result"]["symbol"] == "AAPL"
+    assert result["meta"]["source"] == "OPENAI_TOOL_CALL"
+    assert fake_llm.synthesis_calls[0]["tool_name"] == "get_asset_price"
+    assert fake_llm.synthesis_calls[0]["tool_reply"] == "AAPL 현재가는 $210.50입니다."
+
+
+def test_reply_falls_back_to_original_openai_tool_reply_when_synthesis_fails(monkeypatch):
+    fake_llm = FailingToolSynthesisLLMClient()
+    service = build_openai_tool_call_service(monkeypatch, fake_llm)
+
+    result = service.reply("AAPL 현재가 알려줘", user_id="user-1", auth_header="Bearer test")
+
+    assert result["reply"] == "AAPL 현재가는 $210.50입니다."
+    assert result["meta"]["source"] == "OPENAI_TOOL_CALL"
+    assert fake_llm.synthesis_calls
+
+
 def test_reply_routes_disclosure_count_query_directly_to_search_web(monkeypatch):
     calls: list[str] = []
 

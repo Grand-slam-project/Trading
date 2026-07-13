@@ -588,6 +588,24 @@ class ChatbotService:
         tool_message = self._tool_message_from_arguments(tool_name, arguments, fallback_text)
         return tool_func(auth_header, tool_message)
 
+    def _synthesize_llm_tool_reply(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tool_call: dict,
+        tool_result: dict,
+    ) -> str:
+        function_info = tool_call.get("function") or {}
+        synthesis = self.llm_client.synthesize_tool_result_reply(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            tool_name=function_info.get("name"),
+            tool_reply=str(tool_result.get("reply") or ""),
+            tool_data=tool_result.get("data") if isinstance(tool_result.get("data"), dict) else None,
+        )
+        synthesized_reply = str((synthesis or {}).get("reply") or "").strip()
+        return synthesized_reply or str(tool_result.get("reply") or "")
+
     def reply(
         self,
         message: str,
@@ -717,14 +735,15 @@ class ChatbotService:
         self._emit_trace(trace_callback, "history", "대화 이력 확인")
         history = self._load_recent_history(auth_header, user_id)
         self._emit_trace(trace_callback, "llm", "LLM 답변 준비")
+        system_prompt = self._build_prompt_for_user(
+            auth_header,
+            user_id,
+            text,
+            user_timezone,
+            trace_callback,
+        )
         llm_arguments = {
-            "system_prompt": self._build_prompt_for_user(
-                auth_header,
-                user_id,
-                text,
-                user_timezone,
-                trace_callback,
-            ),
+            "system_prompt": system_prompt,
             "user_message": text,
             "user_id": user_id,
             "auth_header": auth_header,
@@ -745,9 +764,19 @@ class ChatbotService:
             if tool_result:
                 tool_data = tool_result.get("data")
                 trace_steps = self._emit_tool_trace_steps(trace_callback, tool_data)
-                self._record_exchange(auth_header, user_id, text, tool_result["reply"])
+                final_reply = str(tool_result.get("reply") or "")
+                try:
+                    final_reply = self._synthesize_llm_tool_reply(
+                        system_prompt,
+                        text,
+                        tool_call,
+                        tool_result,
+                    )
+                except Exception:
+                    self._log_repository_failure("OpenAI 도구 결과 재합성에 실패했습니다.")
+                self._record_exchange(auth_header, user_id, text, final_reply)
                 return {
-                    "reply": tool_result["reply"],
+                    "reply": final_reply,
                     "actions": tool_result.get("actions") or [],
                     "meta": {
                         "user_id": user_id,

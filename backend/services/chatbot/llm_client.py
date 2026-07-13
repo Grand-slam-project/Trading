@@ -174,6 +174,95 @@ class ChatbotLLMClient:
             "model": self.model,
         }
 
+    @staticmethod
+    def _redact_tool_data(value):
+        if isinstance(value, dict):
+            redacted = {}
+            for key, item in value.items():
+                key_text = str(key).lower()
+                if any(marker in key_text for marker in ["secret", "token", "api_key", "apikey", "account", "password"]):
+                    redacted[key] = "[REDACTED]"
+                else:
+                    redacted[key] = ChatbotLLMClient._redact_tool_data(item)
+            return redacted
+        if isinstance(value, list):
+            return [ChatbotLLMClient._redact_tool_data(item) for item in value]
+        return value
+
+    def synthesize_tool_result_reply(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        tool_name: str | None,
+        tool_reply: str,
+        tool_data: dict | None,
+    ) -> dict:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
+
+        safe_tool_data = self._redact_tool_data(tool_data if isinstance(tool_data, dict) else {})
+        serialized_tool_data = json.dumps(safe_tool_data, ensure_ascii=False, default=str)
+        max_tool_data_chars = min(6000, max(1000, self.max_input_chars * 3))
+        if len(serialized_tool_data) > max_tool_data_chars:
+            serialized_tool_data = f"{serialized_tool_data[:max_tool_data_chars]}\n...[TRUNCATED]"
+
+        messages = [
+            {
+                "role": "system",
+                "content": "\n".join([
+                    system_prompt,
+                    "도구 실행 결과를 바탕으로 최종 답변을 재작성합니다.",
+                    "반드시 한국어로 답변하세요.",
+                    "제공된 도구 결과에 없는 사실을 추가하지 마세요.",
+                    "간결하고 사용자가 바로 행동할 수 있게 답변하세요.",
+                    "투자 판단에는 손실 가능성과 사용자의 최종 확인이 필요하다는 안전 문맥을 유지하세요.",
+                ]),
+            },
+            {
+                "role": "user",
+                "content": "\n".join([
+                    f"사용자 질문: {str(user_message or '').strip()}",
+                    f"도구 이름: {str(tool_name or '').strip() or 'unknown'}",
+                    f"도구 기본 답변: {str(tool_reply or '').strip()}",
+                    "도구 데이터:",
+                    serialized_tool_data,
+                ]),
+            },
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": min(512, self.max_output_tokens),
+        }
+
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout_seconds,
+        )
+
+        if response.status_code >= 400:
+            raise RuntimeError(f"OpenAI 챗봇 재합성 요청 실패: HTTP {response.status_code}")
+
+        data = response.json()
+        usage = data.get("usage") or {}
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        content = (message.get("content") or "").strip()
+        if not content:
+            raise RuntimeError("OpenAI 챗봇 재합성 응답이 비어 있습니다.")
+
+        return {
+            "reply": content,
+            "usage": usage,
+            "model": self.model,
+        }
+
     def stream_reply(
         self,
         *,
