@@ -66,6 +66,50 @@ class ChatbotLLMClient:
         if not isinstance(row, dict) or not row.get("allowed"):
             raise ChatbotLimitError("챗봇 사용량 제한에 도달했습니다. 잠시 후 다시 시도해 주세요.")
 
+    @staticmethod
+    def _usage_int(value) -> int:
+        try:
+            parsed = int(value or 0)
+            return parsed if parsed >= 0 else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _normalize_usage(self, usage: dict | None) -> dict | None:
+        if not isinstance(usage, dict):
+            return None
+
+        normalized = {
+            "prompt_tokens": self._usage_int(usage.get("prompt_tokens")),
+            "completion_tokens": self._usage_int(usage.get("completion_tokens")),
+            "total_tokens": self._usage_int(usage.get("total_tokens")),
+        }
+        if normalized["total_tokens"] <= 0:
+            return None
+        return normalized
+
+    def _record_actual_usage(
+        self,
+        *,
+        auth_header: str | None,
+        user_id: str | None,
+        usage: dict | None,
+        request_type: str,
+    ) -> None:
+        normalized = self._normalize_usage(usage)
+        if not auth_header or not user_id or not normalized:
+            return
+
+        payload = {
+            "user_id": user_id,
+            "request_type": str(request_type or "chat_reply").strip() or "chat_reply",
+            "model": self.model,
+            **normalized,
+        }
+        try:
+            query_supabase(auth_header, "chatbot_token_usage_logs", "POST", json_data=payload)
+        except Exception:
+            return
+
     def _to_openai_tools(self, function_schemas: list[dict] | None) -> list[dict]:
         tools = []
         for schema in (function_schemas or []):
@@ -167,6 +211,13 @@ class ChatbotLLMClient:
         if not content:
             content = "응답을 만들지 못했습니다. 잠시 후 다시 시도해 주세요."
 
+        self._record_actual_usage(
+            auth_header=auth_header,
+            user_id=user_id,
+            usage=usage,
+            request_type="chat_reply",
+        )
+
         return {
             "reply": content,
             "usage": usage,
@@ -197,6 +248,8 @@ class ChatbotLLMClient:
         tool_name: str | None,
         tool_reply: str,
         tool_data: dict | None,
+        user_id: str | None = None,
+        auth_header: str | None = None,
     ) -> dict:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
@@ -256,6 +309,13 @@ class ChatbotLLMClient:
         content = (message.get("content") or "").strip()
         if not content:
             raise RuntimeError("OpenAI 챗봇 재합성 응답이 비어 있습니다.")
+
+        self._record_actual_usage(
+            auth_header=auth_header,
+            user_id=user_id,
+            usage=usage,
+            request_type="tool_synthesis",
+        )
 
         return {
             "reply": content,
@@ -386,6 +446,12 @@ class ChatbotLLMClient:
             reply_text = "응답을 만들지 못했습니다. 잠시 후 다시 시도해 주세요."
 
         tool_calls = [tool_call_deltas[index] for index in sorted(tool_call_deltas)]
+        self._record_actual_usage(
+            auth_header=auth_header,
+            user_id=user_id,
+            usage=usage,
+            request_type="chat_stream",
+        )
         return {
             "reply": reply_text,
             "usage": usage,

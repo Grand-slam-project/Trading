@@ -625,6 +625,8 @@ class ChatbotService:
         user_message: str,
         tool_call: dict,
         tool_result: dict,
+        user_id: str | None,
+        auth_header: str | None,
     ) -> str:
         function_info = tool_call.get("function") or {}
         synthesis = self.llm_client.synthesize_tool_result_reply(
@@ -633,6 +635,8 @@ class ChatbotService:
             tool_name=function_info.get("name"),
             tool_reply=str(tool_result.get("reply") or ""),
             tool_data=tool_result.get("data") if isinstance(tool_result.get("data"), dict) else None,
+            user_id=user_id,
+            auth_header=auth_header,
         )
         synthesized_reply = str((synthesis or {}).get("reply") or "").strip()
         return synthesized_reply or str(tool_result.get("reply") or "")
@@ -828,6 +832,8 @@ class ChatbotService:
                         text,
                         tool_call,
                         tool_result,
+                        user_id,
+                        auth_header,
                     )
                 except Exception:
                     self._log_repository_failure("OpenAI 도구 결과 재합성에 실패했습니다.")
