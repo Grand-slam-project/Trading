@@ -76,6 +76,67 @@ def test_chart_quote_includes_current_price_from_exchange_client(monkeypatch):
     assert response.json["data"]["change_rate"] == 2.35
 
 
+def test_invalid_numeric_stock_code_returns_symbol_not_found_before_quote(monkeypatch):
+    calls = []
+
+    def fake_get_internal(path, auth_header, params=None):
+        calls.append((path, params))
+        if path == "/api/symbol/lookup":
+            raise RuntimeError("검색 결과가 없습니다.")
+        if path == "/api/symbol/search":
+            return {"data": {"items": []}}
+        if path == "/api/chart/quote":
+            raise AssertionError("invalid numeric stock code should not call quote API")
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(tool_registry, "_get_internal", fake_get_internal)
+
+    result = tool_registry.get_asset_price("Bearer test", "999999 현재가 얼마야")
+
+    assert result["data"]["reason"] == "symbol_not_found"
+    assert result["data"]["query"] == "999999"
+    assert [path for path, _ in calls] == ["/api/symbol/lookup", "/api/symbol/search"]
+
+
+def test_orderbook_question_routes_to_orderbook_lookup(monkeypatch):
+    calls = []
+
+    def fake_get_internal(path, auth_header, params=None):
+        calls.append((path, params))
+        if path == "/api/symbol/lookup":
+            return {
+                "data": {
+                    "symbol": "005930",
+                    "display_name": "삼성전자",
+                    "asset_type": "STOCK",
+                    "market": "KR",
+                }
+            }
+        if path == "/api/chart/orderbook":
+            return {
+                "data": {
+                    "symbol": "005930",
+                    "asks": [{"price": 75500, "size": 120}],
+                    "bids": [{"price": 75400, "size": 95}],
+                },
+                "meta": {"source": "LIVE", "is_mock": False},
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(tool_registry, "_get_internal", fake_get_internal)
+
+    result = tool_registry.run_chatbot_tool("Bearer test", "삼성전자 호가 알려줘")
+
+    assert result["data"]["source"] == "ASSET_ORDERBOOK"
+    assert result["data"]["symbol"] == "005930"
+    assert result["data"]["best_ask"]["price"] == 75500
+    assert result["data"]["best_bid"]["price"] == 75400
+    assert calls == [
+        ("/api/symbol/lookup", {"query": "삼성전자"}),
+        ("/api/chart/orderbook", {"exchange": "TOSS", "symbol": "005930", "broker_env": "REAL"}),
+    ]
+
+
 def test_portfolio_summary_omits_missing_optional_mock_accounts(monkeypatch):
     calls = []
 

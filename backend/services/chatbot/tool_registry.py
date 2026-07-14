@@ -275,6 +275,7 @@ def list_available_tools() -> list[str]:
         "list_open_orders",
         "get_exchange_rate",
         "get_asset_price",
+        "get_asset_orderbook",
         "search_web",
         "get_asset_outlook",
     ]
@@ -371,6 +372,10 @@ def _extract_symbol_query(text: str) -> str:
 def _is_likely_symbol_token(value: str) -> bool:
     token = str(value or "").strip().upper()
     return bool(re.fullmatch(r"[A-Z0-9._-]{2,12}", token))
+
+
+def _is_numeric_stock_code(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{4,7}", str(value or "").strip()))
 
 
 def _resolve_symbol(auth_header: str, query: str) -> dict:
@@ -717,7 +722,7 @@ def get_asset_price(auth_header: str, message: str) -> dict:
     except SymbolDisambiguationError as error:
         return _build_symbol_choice_response(error.query, error.candidates)
     except Exception:
-        if not _is_likely_symbol_token(symbol_query):
+        if _is_numeric_stock_code(symbol_query) or not _is_likely_symbol_token(symbol_query):
             return {
                 "reply": f"{symbol_query} 종목을 찾지 못했습니다.\n종목명이나 종목코드를 다시 확인해 주세요.",
                 "data": {"source": "ASSET_PRICE", "query": symbol_query, "reason": "symbol_not_found"},
@@ -790,6 +795,106 @@ def get_asset_price(auth_header: str, message: str) -> dict:
             "current_price": current_price,
             "change_rate": change_rate,
             "currency": currency,
+        },
+    }
+
+
+def get_asset_orderbook(auth_header: str, message: str) -> dict:
+    symbol_query = _extract_symbol_query(message)
+    if not symbol_query:
+        return {
+            "reply": "호가를 확인할 종목명이나 종목코드를 알려주세요.",
+            "data": {"source": "ASSET_ORDERBOOK", "reason": "missing_symbol"},
+        }
+
+    try:
+        symbol_data = _resolve_symbol(auth_header, symbol_query)
+    except SymbolDisambiguationError as error:
+        return _build_symbol_choice_response(error.query, error.candidates)
+    except Exception:
+        return {
+            "reply": f"{symbol_query} 종목을 찾지 못했습니다.\n종목명이나 종목코드를 다시 확인해 주세요.",
+            "data": {"source": "ASSET_ORDERBOOK", "query": symbol_query, "reason": "symbol_not_found"},
+        }
+
+    symbol = str(symbol_data.get("symbol") or symbol_query).upper()
+    display_name = str(symbol_data.get("display_name") or symbol).strip()
+    asset_type = str(symbol_data.get("asset_type") or "").upper()
+    market = str(symbol_data.get("market") or "").strip().upper()
+    label = f"{display_name}({symbol})" if display_name and display_name.upper() != symbol else symbol
+    exchange = _detect_exchange(message) or _default_exchange_for_asset(asset_type, market)
+    broker_env = _detect_env(message) or "REAL"
+
+    try:
+        payload = _get_internal(
+            "/api/chart/orderbook",
+            auth_header,
+            params={
+                "exchange": exchange,
+                "symbol": symbol,
+                "broker_env": broker_env,
+            },
+        )
+    except Exception:
+        return {
+            "reply": f"{label} 호가 정보를 조회하지 못했습니다.\n거래소 연결 상태, API 키 권한, 장 운영 상태를 확인해 주세요.",
+            "data": {
+                "source": "ASSET_ORDERBOOK",
+                "symbol": symbol,
+                "exchange": exchange,
+                "broker_env": broker_env,
+                "reason": "orderbook_api_failed",
+            },
+        }
+
+    data = payload.get("data") or {}
+    meta = payload.get("meta") or {}
+    asks = data.get("asks") if isinstance(data.get("asks"), list) else []
+    bids = data.get("bids") if isinstance(data.get("bids"), list) else []
+    best_ask = asks[0] if asks else {}
+    best_bid = bids[0] if bids else {}
+    best_ask_price = _to_float(best_ask.get("price"))
+    best_bid_price = _to_float(best_bid.get("price"))
+    best_ask_size = _to_float(best_ask.get("size"))
+    best_bid_size = _to_float(best_bid.get("size"))
+    currency = "USD" if market == "US" else "KRW"
+
+    if best_ask_price <= 0 and best_bid_price <= 0:
+        return {
+            "reply": f"{label} 호가 정보를 찾지 못했습니다.\n거래소 API 응답이 비어 있거나 장 운영 상태가 호가 제공 대상이 아닐 수 있습니다.",
+            "data": {
+                "source": "ASSET_ORDERBOOK",
+                "symbol": symbol,
+                "exchange": exchange,
+                "broker_env": broker_env,
+                "reason": "empty_orderbook",
+            },
+        }
+
+    source_label = str(meta.get("source") or "LIVE").upper()
+    mock_notice = "\n실시간 호가가 아닌 임시 호가일 수 있습니다." if meta.get("is_mock") or source_label == "MOCK" else ""
+    reply_lines = [f"{label} 호가입니다."]
+    if best_ask_price > 0:
+        reply_lines.append(f"최우선 매도호가: {_format_money(best_ask_price, currency)} / 잔량 {_format_quantity(best_ask_size)}")
+    if best_bid_price > 0:
+        reply_lines.append(f"최우선 매수호가: {_format_money(best_bid_price, currency)} / 잔량 {_format_quantity(best_bid_size)}")
+    reply_lines.append(f"출처: {source_label}{mock_notice}")
+
+    return {
+        "reply": "\n".join(reply_lines),
+        "data": {
+            "source": "ASSET_ORDERBOOK",
+            "symbol": symbol,
+            "display_name": display_name,
+            "asset_type": asset_type,
+            "market": market,
+            "exchange": exchange,
+            "broker_env": broker_env,
+            "best_ask": best_ask,
+            "best_bid": best_bid,
+            "asks": asks[:5],
+            "bids": bids[:5],
+            "meta": meta,
         },
     }
 
@@ -2111,6 +2216,13 @@ def _is_asset_price_request(text: str) -> bool:
     return bool(_extract_symbol_query(value))
 
 
+def _is_asset_orderbook_request(text: str) -> bool:
+    value = str(text or "")
+    if not any(keyword in value for keyword in ["호가", "오더북", "orderbook", "ORDERBOOK"]):
+        return False
+    return bool(_extract_symbol_query(value))
+
+
 def _extract_multi_asset_symbol_queries(text: str) -> list[str]:
     value = str(text or "")
     matches = []
@@ -2391,6 +2503,8 @@ def run_chatbot_tool(auth_header: str | None, message: str) -> dict | None:
         return get_investment_profile_reanalysis_guide()
     if any(keyword in text for keyword in ["환율", "환전", "달러", "미달러", "엔화", "유로", "위안", "테더", "USDT"]):
         return guarded("get_exchange_rate", get_exchange_rate)
+    if _is_asset_orderbook_request(text):
+        return guarded("get_asset_orderbook", get_asset_orderbook)
     if _is_asset_price_request(text):
         return guarded("get_asset_price", get_asset_price)
     if any(keyword in text for keyword in ["순위", "랭킹", "상위", "필터"]):

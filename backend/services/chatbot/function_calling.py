@@ -97,6 +97,19 @@ FUNCTION_SCHEMAS = [
         },
     },
     {
+        "name": "get_asset_orderbook",
+        "description": "특정 주식 또는 코인의 호가 정보를 프로젝트 호가 API 기준으로 조회합니다. 매도/매수 최우선 호가와 잔량을 반환합니다.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "종목명 또는 종목코드. 예: 삼성전자, 005930, BTC"},
+                "exchange": {"type": "string", "description": "TOSS, KIS, COINONE, BINANCE 등"},
+                "broker_env": {"type": "string", "enum": ["REAL", "MOCK"]},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "get_asset_outlook",
         "description": "특정 주식 또는 코인의 전망, 리스크, 최근 뉴스/공시 흐름을 내부 RAG/DB/API와 필요한 경우 웹 검색 결과 기준으로 조회합니다.",
         "parameters": {

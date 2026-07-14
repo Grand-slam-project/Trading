@@ -691,8 +691,13 @@ class TossClient(ExchangeClient):
                 )
                 has_api_change_rate = rate_key is not None
                 change_rate = float(result.get(rate_key) or 0.0) if rate_key else 0.0
-                if rate_key in {"changeRate", "change_rate"} and abs(change_rate) <= 1:
-                    change_rate *= 100.0
+                price_change = float(
+                    result.get("priceChange")
+                    or result.get("price_change")
+                    or result.get("changePrice")
+                    or result.get("change_price")
+                    or 0.0
+                )
                 prev_close = float(
                     result.get("previousClosePrice")
                     or result.get("prev_close_price")
@@ -700,24 +705,37 @@ class TossClient(ExchangeClient):
                     or result.get("base_price")
                     or 0.0
                 )
+                if rate_key in {"changeRate", "change_rate"} and abs(change_rate) <= 1 and current_price and prev_close:
+                    calculated_rate = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0.0
+                    scaled_rate = change_rate * 100.0
+                    if abs(scaled_rate - calculated_rate) < abs(change_rate - calculated_rate):
+                        change_rate = scaled_rate
+                elif not has_api_change_rate and price_change and current_price:
+                    prev_close = current_price - price_change
+                    if prev_close > 0:
+                        change_rate = ((current_price - prev_close) / prev_close) * 100
             except (ValueError, TypeError):
                 current_price = 0.0
                 change_rate = 0.0
+                price_change = 0.0
                 prev_close = 0.0
                 has_api_change_rate = False
 
             # Toss 가격 API가 등락률을 직접 주면 캔들 보조 조회로 API 호출을 늘리지 않습니다.
-            if not prev_close and not has_api_change_rate:
+            prev_close_from_candles = False
+            if not prev_close and not has_api_change_rate and not price_change:
                 try:
                     candles = self._get_candles_impl(candidate, interval="1d", count=2)
                     if isinstance(candles, list) and len(candles) >= 2:
                         prev_close = float(candles[-2].get("close") or 0.0)
+                        prev_close_from_candles = True
                     elif isinstance(candles, list) and len(candles) >= 1:
                         prev_close = float(candles[-1].get("close") or 0.0)
+                        prev_close_from_candles = True
                 except Exception:
                     pass
 
-            if current_price and prev_close and not has_api_change_rate:
+            if current_price and prev_close and not has_api_change_rate and prev_close_from_candles:
                 change_rate = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0.0
 
             if current_price or change_rate or prev_close:
