@@ -22,6 +22,12 @@ ALLOWED_SORTS = {
     "recent_used_at",
     "created_at",
 }
+SUPABASE_PAGE_SIZE = 1000
+USAGE_LOG_USER_ID_BATCH_SIZE = 200
+
+
+class InvalidQueryParameter(ValueError):
+    pass
 
 
 def _utc_now():
@@ -116,30 +122,53 @@ def _int_value(value):
         return 0
 
 
-def _load_profiles(query, limit):
+def _bounded_query_int(value, default, minimum, maximum, name):
+    if value is None or value == "":
+        return default
+    try:
+        return min(max(int(value), minimum), maximum)
+    except (TypeError, ValueError) as error:
+        raise InvalidQueryParameter(f"{name} 값은 숫자여야 합니다.") from error
+
+
+def _load_paginated_rows(endpoint, params):
+    rows = []
+    offset = 0
+    while True:
+        page_params = {**params, "limit": str(SUPABASE_PAGE_SIZE), "offset": str(offset)}
+        page = _supabase_request(endpoint, params=page_params) or []
+        rows.extend(page)
+        if len(page) < SUPABASE_PAGE_SIZE:
+            return rows
+        offset += SUPABASE_PAGE_SIZE
+
+
+def _load_profiles(query):
     params = {
         "select": "id,email,nickname,role,updated_at",
-        "order": "updated_at.desc",
-        "limit": str(limit),
+        "order": "updated_at.desc,id.desc",
     }
     if query:
         safe_query = query.replace("%", "").replace(",", " ").strip()
         params["or"] = f"(email.ilike.*{safe_query}*,nickname.ilike.*{safe_query}*)"
-    return _supabase_request("profiles", params=params) or []
+    return _load_paginated_rows("profiles", params)
 
 
 def _load_usage_logs(user_ids, since=None):
     ids = [str(user_id) for user_id in user_ids if user_id]
     if not ids:
         return []
-    params = {
-        "select": "user_id,request_type,model,prompt_tokens,completion_tokens,total_tokens,created_at",
-        "user_id": f"in.({','.join(ids)})",
-        "order": "created_at.desc",
-    }
-    if since:
-        params["created_at"] = f"gte.{since.isoformat()}"
-    return _supabase_request("chatbot_token_usage_logs", params=params) or []
+    logs = []
+    for index in range(0, len(ids), USAGE_LOG_USER_ID_BATCH_SIZE):
+        params = {
+            "select": "user_id,request_type,model,prompt_tokens,completion_tokens,total_tokens,created_at",
+            "user_id": f"in.({','.join(ids[index:index + USAGE_LOG_USER_ID_BATCH_SIZE])})",
+            "order": "created_at.desc,id.desc",
+        }
+        if since:
+            params["created_at"] = f"gte.{since.isoformat()}"
+        logs.extend(_load_paginated_rows("chatbot_token_usage_logs", params))
+    return logs
 
 
 def _build_usage_by_user(logs, now):
@@ -182,13 +211,13 @@ def list_admin_users():
         query = str(request.args.get("q") or "").strip()
         sort = str(request.args.get("sort") or "tokens_30d")
         order = str(request.args.get("order") or "desc").lower()
-        limit = min(max(int(request.args.get("limit") or 50), 1), 200)
+        limit = _bounded_query_int(request.args.get("limit"), 50, 1, 200, "limit")
         if sort not in ALLOWED_SORTS:
             sort = "tokens_30d"
         if order not in {"asc", "desc"}:
             order = "desc"
 
-        profiles = _load_profiles(query, limit)
+        profiles = _load_profiles(query)
         now = _utc_now()
         usage_by_user = _build_usage_by_user(_load_usage_logs([row.get("id") for row in profiles]), now)
         rows = []
@@ -219,7 +248,9 @@ def list_admin_users():
             "tokens30d": sum(item["usage"]["tokens30d"] for item in rows),
             "activeUsers24h": sum(1 for item in rows if item["usage"]["recentUsedAt"] and _parse_datetime(item["usage"]["recentUsedAt"]) and _parse_datetime(item["usage"]["recentUsedAt"]) >= now - timedelta(hours=24)),
         }
-        return jsonify({"success": True, "data": rows, "summary": summary})
+        return jsonify({"success": True, "data": rows[:limit], "summary": summary})
+    except InvalidQueryParameter as error:
+        return _json_error(error, "유저 관리 조회 실패", 400)
     except ValueError as error:
         return _json_error(error, "유저 관리 조회 실패", 401)
     except PermissionError as error:
@@ -232,8 +263,8 @@ def list_admin_users():
 def get_admin_user_chatbot_usage(user_id):
     try:
         _verify_admin(request.headers.get("Authorization"))
-        days = min(max(int(request.args.get("days") or 30), 1), 180)
-        limit = min(max(int(request.args.get("limit") or 50), 1), 200)
+        days = _bounded_query_int(request.args.get("days"), 30, 1, 180, "days")
+        limit = _bounded_query_int(request.args.get("limit"), 50, 1, 200, "limit")
         since = _utc_now() - timedelta(days=days)
         profiles = _supabase_request(
             "profiles",
@@ -286,6 +317,8 @@ def get_admin_user_chatbot_usage(user_id):
             "byRequestType": dict(by_type),
             "recentLogs": recent_logs,
         })
+    except InvalidQueryParameter as error:
+        return _json_error(error, "유저 사용량 조회 실패", 400)
     except ValueError as error:
         return _json_error(error, "유저 사용량 조회 실패", 401)
     except PermissionError as error:

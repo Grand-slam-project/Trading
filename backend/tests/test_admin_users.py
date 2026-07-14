@@ -63,6 +63,57 @@ def test_list_admin_users_returns_usage_summary(monkeypatch, client):
     assert payload["data"][0]["usage"]["tokens7d"] == 15
 
 
+def test_list_admin_users_paginates_all_matches_for_system_wide_summary(monkeypatch, client):
+    now = datetime(2026, 7, 14, 5, 0, tzinfo=timezone.utc)
+    profiles = [
+        {"id": "user-1", "email": "alpha-1@example.com", "nickname": "alpha-1", "role": "USER", "updated_at": "2026-07-14T00:00:00Z"},
+        {"id": "user-2", "email": "alpha-2@example.com", "nickname": "alpha-2", "role": "USER", "updated_at": "2026-07-13T00:00:00Z"},
+        {"id": "user-3", "email": "alpha-3@example.com", "nickname": "alpha-3", "role": "USER", "updated_at": "2026-07-12T00:00:00Z"},
+    ]
+    logs = [
+        {"user_id": "user-1", "total_tokens": 10, "created_at": now.isoformat()},
+        {"user_id": "user-2", "total_tokens": 20, "created_at": now.isoformat()},
+        {"user_id": "user-3", "total_tokens": 30, "created_at": now.isoformat()},
+    ]
+
+    monkeypatch.setattr(admin_users, "_verify_admin", lambda auth_header: {"id": "admin-1"})
+    monkeypatch.setattr(admin_users, "_utc_now", lambda: now)
+    monkeypatch.setattr(admin_users, "SUPABASE_PAGE_SIZE", 2)
+
+    def fake_request(endpoint, method="GET", params=None, json_data=None, extra_headers=None):
+        offset = int(params.get("offset", 0))
+        page_size = int(params["limit"])
+        if endpoint == "profiles":
+            assert "alpha" in params["or"]
+            return profiles[offset:offset + page_size]
+        if endpoint == "chatbot_token_usage_logs":
+            return logs[offset:offset + page_size]
+        return []
+
+    monkeypatch.setattr(admin_users, "_supabase_request", fake_request)
+
+    response = client.get("/api/admin/users?q=alpha&limit=2", headers={"Authorization": "Bearer admin"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert len(payload["data"]) == 2
+    assert payload["summary"] == {
+        "totalUsers": 3,
+        "todayTokens": 60,
+        "tokens30d": 60,
+        "activeUsers24h": 3,
+    }
+
+
+def test_list_admin_users_rejects_invalid_limit(monkeypatch, client):
+    monkeypatch.setattr(admin_users, "_verify_admin", lambda auth_header: {"id": "admin-1"})
+
+    response = client.get("/api/admin/users?limit=x", headers={"Authorization": "Bearer admin"})
+
+    assert response.status_code == 400
+    assert response.get_json()["success"] is False
+
+
 def test_get_admin_user_chatbot_usage_returns_daily_rows(monkeypatch, client):
     now = datetime(2026, 7, 14, 5, 0, tzinfo=timezone.utc)
 
