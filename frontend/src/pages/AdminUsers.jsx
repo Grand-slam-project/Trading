@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Header from '../components/Header.jsx'
 import { supabase } from '../supabaseClient.js'
 import { getApiErrorMessage } from '../lib/apiError.js'
@@ -44,6 +44,7 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState('')
   const [detailError, setDetailError] = useState('')
+  const detailRequestSequence = useRef(0)
 
   const selectedUser = useMemo(
     () => users.find((item) => item.id === selectedUserId) || users[0] || null,
@@ -81,35 +82,56 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
     }
   }
 
-  const loadDetail = async (userId) => {
-    if (!userId) {
-      setDetail(null)
-      return
-    }
-    setDetailLoading(true)
-    setDetailError('')
-    try {
-      const headers = await authHeaders()
-      const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/chatbot-usage?days=30&limit=50`, { headers })
-      const payload = await response.json().catch(() => ({}))
-      if (!response.ok || payload.success === false) {
-        throw new Error(getApiErrorMessage(payload, '유저 사용량을 불러오지 못했습니다.'))
-      }
-      setDetail(payload)
-    } catch (requestError) {
-      setDetail(null)
-      setDetailError(requestError.message || '유저 사용량을 불러오지 못했습니다.')
-    } finally {
-      setDetailLoading(false)
-    }
-  }
-
   useEffect(() => {
     loadUsers()
   }, [sort, order])
 
   useEffect(() => {
-    if (selectedUser?.id) loadDetail(selectedUser.id)
+    const userId = selectedUser?.id
+    const requestSequence = detailRequestSequence.current + 1
+    detailRequestSequence.current = requestSequence
+
+    if (!userId) {
+      setDetail(null)
+      setDetailLoading(false)
+      setDetailError('')
+      return undefined
+    }
+
+    const controller = new AbortController()
+    setDetail(null)
+    setDetailLoading(true)
+    setDetailError('')
+
+    const loadDetail = async () => {
+      try {
+        const headers = await authHeaders()
+        if (controller.signal.aborted) return
+
+        const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/chatbot-usage?days=30&limit=50`, {
+          headers,
+          signal: controller.signal,
+        })
+        const payload = await response.json().catch(() => ({}))
+        if (!response.ok || payload.success === false) {
+          throw new Error(getApiErrorMessage(payload, '유저 사용량을 불러오지 못했습니다.'))
+        }
+        if (detailRequestSequence.current === requestSequence) {
+          setDetail(payload)
+        }
+      } catch (requestError) {
+        if (requestError.name === 'AbortError' || detailRequestSequence.current !== requestSequence) return
+        setDetail(null)
+        setDetailError(requestError.message || '유저 사용량을 불러오지 못했습니다.')
+      } finally {
+        if (detailRequestSequence.current === requestSequence) {
+          setDetailLoading(false)
+        }
+      }
+    }
+
+    loadDetail()
+    return () => controller.abort()
   }, [selectedUser?.id])
 
   return (
@@ -161,41 +183,45 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
 
         <section className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
           <div className="overflow-hidden rounded-lg border border-slate-700/80 bg-slate-surface p-3 sm:p-4">
-            <div className="hidden grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_120px] rounded-t-lg bg-[#0f172a] text-xs font-bold text-slate-400 lg:grid">
-              <div className="px-3 py-3">유저</div>
-              <div className="px-3 py-3">권한</div>
-              <div className="px-3 py-3 text-right">오늘</div>
-              <div className="px-3 py-3 text-right">7일</div>
-              <div className="px-3 py-3 text-right">30일</div>
-              <div className="px-3 py-3 text-right">전체</div>
-              <div className="px-3 py-3">최근 사용</div>
-            </div>
-            <div className="overflow-hidden rounded-lg border border-slate-800 lg:rounded-t-none lg:border-t-0">
-              {loading ? (
-                <div className="px-4 py-10 text-center text-sm font-bold text-slate-400">유저 목록을 불러오는 중입니다.</div>
-              ) : error ? (
-                <div className="px-4 py-10 text-center text-sm font-bold text-rose-400">{error}</div>
-              ) : users.length === 0 ? (
-                <div className="px-4 py-10 text-center text-sm font-bold text-slate-500">표시할 유저가 없습니다.</div>
-              ) : users.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setSelectedUserId(item.id)}
-                  className={`grid w-full grid-cols-2 gap-2 border-t border-slate-800 px-4 py-4 text-left text-sm first:border-t-0 hover:bg-white/[0.03] lg:grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_120px] lg:px-0 lg:py-0 ${selectedUser?.id === item.id ? 'bg-ai-cyan/5' : ''}`}
-                >
-                  <span className="min-w-0 lg:px-3 lg:py-3">
-                    <span className="block truncate font-bold text-white">{item.email || item.nickname || '-'}</span>
-                    <span className="block truncate text-xs text-slate-500">{item.nickname || item.id}</span>
-                  </span>
-                  <span className="text-xs font-bold text-ai-cyan lg:px-3 lg:py-3">{item.role}</span>
-                  <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.todayTokens)}</span>
-                  <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens7d)}</span>
-                  <span className="font-mono text-xs text-white lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens30d)}</span>
-                  <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.totalTokens)}</span>
-                  <span className="col-span-2 text-xs text-slate-500 lg:col-span-1 lg:px-3 lg:py-3">{formatDateTime(item.usage?.recentUsedAt)}</span>
-                </button>
-              ))}
+            <div className="lg:overflow-x-auto">
+              <div className="lg:min-w-[760px]">
+                <div className="hidden grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_120px] rounded-t-lg bg-[#0f172a] text-xs font-bold text-slate-400 lg:grid">
+                  <div className="px-3 py-3">유저</div>
+                  <div className="px-3 py-3">권한</div>
+                  <div className="px-3 py-3 text-right">오늘</div>
+                  <div className="px-3 py-3 text-right">7일</div>
+                  <div className="px-3 py-3 text-right">30일</div>
+                  <div className="px-3 py-3 text-right">전체</div>
+                  <div className="px-3 py-3">최근 사용</div>
+                </div>
+                <div className="overflow-hidden rounded-lg border border-slate-800 lg:rounded-t-none lg:border-t-0">
+                  {loading ? (
+                    <div className="px-4 py-10 text-center text-sm font-bold text-slate-400">유저 목록을 불러오는 중입니다.</div>
+                  ) : error ? (
+                    <div className="px-4 py-10 text-center text-sm font-bold text-rose-400">{error}</div>
+                  ) : users.length === 0 ? (
+                    <div className="px-4 py-10 text-center text-sm font-bold text-slate-500">표시할 유저가 없습니다.</div>
+                  ) : users.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setSelectedUserId(item.id)}
+                      className={`grid w-full grid-cols-2 gap-2 border-t border-slate-800 px-4 py-4 text-left text-sm first:border-t-0 hover:bg-white/[0.03] lg:grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_120px] lg:px-0 lg:py-0 ${selectedUser?.id === item.id ? 'bg-ai-cyan/5' : ''}`}
+                    >
+                      <span className="min-w-0 lg:px-3 lg:py-3">
+                        <span className="block truncate font-bold text-white">{item.email || item.nickname || '-'}</span>
+                        <span className="block truncate text-xs text-slate-500">{item.nickname || item.id}</span>
+                      </span>
+                      <span className="text-xs font-bold text-ai-cyan lg:px-3 lg:py-3">{item.role}</span>
+                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.todayTokens)}</span>
+                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens7d)}</span>
+                      <span className="font-mono text-xs text-white lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens30d)}</span>
+                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.totalTokens)}</span>
+                      <span className="col-span-2 text-xs text-slate-500 lg:col-span-1 lg:px-3 lg:py-3">{formatDateTime(item.usage?.recentUsedAt)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
