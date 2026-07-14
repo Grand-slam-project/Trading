@@ -213,10 +213,22 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                         <span className="block truncate text-xs text-slate-500">{item.nickname || item.id}</span>
                       </span>
                       <span className="text-xs font-bold text-ai-cyan lg:px-3 lg:py-3">{item.role}</span>
-                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.todayTokens)}</span>
-                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens7d)}</span>
-                      <span className="font-mono text-xs text-white lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.tokens30d)}</span>
-                      <span className="font-mono text-xs text-slate-300 lg:px-3 lg:py-3 lg:text-right">{formatNumber(item.usage?.totalTokens)}</span>
+                      <span className="flex items-center justify-between gap-2 font-mono text-xs text-slate-300 lg:block lg:px-3 lg:py-3 lg:text-right">
+                        <span className="font-inter font-bold text-slate-500 lg:hidden">오늘</span>
+                        <span>{formatNumber(item.usage?.todayTokens)}</span>
+                      </span>
+                      <span className="flex items-center justify-between gap-2 font-mono text-xs text-slate-300 lg:block lg:px-3 lg:py-3 lg:text-right">
+                        <span className="font-inter font-bold text-slate-500 lg:hidden">7일</span>
+                        <span>{formatNumber(item.usage?.tokens7d)}</span>
+                      </span>
+                      <span className="flex items-center justify-between gap-2 font-mono text-xs text-white lg:block lg:px-3 lg:py-3 lg:text-right">
+                        <span className="font-inter font-bold text-slate-500 lg:hidden">30일</span>
+                        <span>{formatNumber(item.usage?.tokens30d)}</span>
+                      </span>
+                      <span className="flex items-center justify-between gap-2 font-mono text-xs text-slate-300 lg:block lg:px-3 lg:py-3 lg:text-right">
+                        <span className="font-inter font-bold text-slate-500 lg:hidden">전체</span>
+                        <span>{formatNumber(item.usage?.totalTokens)}</span>
+                      </span>
                       <span className="col-span-2 text-xs text-slate-500 lg:col-span-1 lg:px-3 lg:py-3">{formatDateTime(item.usage?.recentUsedAt)}</span>
                     </button>
                   ))}

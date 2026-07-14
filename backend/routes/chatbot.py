@@ -96,6 +96,7 @@ def stream_chatbot_message():
                         user_timezone=data.get("timezone"),
                         trace_callback=publish_trace,
                         delta_callback=publish_delta,
+                        request_id=request_id,
                     )
                     event_queue.put(("result", result))
                 except Exception as error:

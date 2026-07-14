@@ -1,3 +1,8 @@
+import json
+import logging
+
+import jwt
+
 from backend.services.chatbot.llm_client import ChatbotLLMClient
 
 
@@ -14,6 +19,33 @@ class FakeResponse:
                 "total_tokens": 18,
             },
         }
+
+
+class FakeStreamResponse:
+    status_code = 200
+
+    @staticmethod
+    def iter_lines(decode_unicode=True):
+        chunks = [
+            {"choices": [{"delta": {"content": "스트림"}}]},
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 13,
+                    "completion_tokens": 8,
+                    "total_tokens": 21,
+                },
+            },
+        ]
+        return [
+            *(f"data: {json.dumps(chunk)}" for chunk in chunks),
+            "data: [DONE]",
+        ]
+
+
+def auth_header(user_id="user-1"):
+    token = jwt.encode({"sub": user_id}, "test-secret", algorithm="HS256")
+    return f"Bearer {token}"
 
 
 def test_normalize_usage_requires_positive_total_tokens():
@@ -33,42 +65,48 @@ def test_normalize_usage_requires_positive_total_tokens():
     }
 
 
-def test_generate_reply_records_actual_usage(monkeypatch):
-    calls = []
+def test_generate_reply_records_actual_usage_with_service_role(monkeypatch):
+    usage_calls = []
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
         "backend.services.chatbot.llm_client.requests.post",
         lambda *args, **kwargs: FakeResponse(),
     )
 
-    def fake_query(auth_header, endpoint, method="GET", json_data=None, params=None, extra_headers=None):
-        if endpoint == "rpc/consume_chatbot_usage":
-            return [{"allowed": True}]
-        calls.append({
-            "auth_header": auth_header,
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase",
+        lambda *args, **kwargs: [{"allowed": True}],
+    )
+
+    def fake_service_query(endpoint, method="GET", json_data=None, params=None):
+        usage_calls.append({
             "endpoint": endpoint,
             "method": method,
             "json_data": json_data,
         })
         return []
 
-    monkeypatch.setattr("backend.services.chatbot.llm_client.query_supabase", fake_query)
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase_as_service_role",
+        fake_service_query,
+    )
 
     client = ChatbotLLMClient()
     result = client.generate_reply(
         system_prompt="시스템",
         user_message="질문",
         user_id="user-1",
-        auth_header="Bearer test",
+        auth_header=auth_header(),
+        request_id="request-1",
     )
 
     assert result["usage"]["total_tokens"] == 18
-    assert calls == [{
-        "auth_header": "Bearer test",
+    assert usage_calls == [{
         "endpoint": "chatbot_token_usage_logs",
         "method": "POST",
         "json_data": {
             "user_id": "user-1",
+            "request_id": "request-1",
             "request_type": "chat_reply",
             "model": client.model,
             "prompt_tokens": 11,
@@ -78,27 +116,138 @@ def test_generate_reply_records_actual_usage(monkeypatch):
     }]
 
 
-def test_usage_logging_failure_does_not_fail_reply(monkeypatch):
+def test_tool_synthesis_records_actual_usage_with_request_id(monkeypatch):
+    usage_calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.requests.post",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase_as_service_role",
+        lambda endpoint, method="GET", json_data=None, params=None: usage_calls.append({
+            "endpoint": endpoint,
+            "method": method,
+            "json_data": json_data,
+        }),
+    )
+
+    client = ChatbotLLMClient()
+    result = client.synthesize_tool_result_reply(
+        system_prompt="시스템",
+        user_message="질문",
+        tool_name="get_price",
+        tool_reply="결과",
+        tool_data={"price": 100},
+        user_id="user-1",
+        auth_header=auth_header(),
+        request_id="request-tool",
+    )
+
+    assert result["usage"]["total_tokens"] == 18
+    assert usage_calls[0]["json_data"] == {
+        "user_id": "user-1",
+        "request_id": "request-tool",
+        "request_type": "tool_synthesis",
+        "model": client.model,
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+
+
+def test_chat_stream_records_actual_usage_with_request_id(monkeypatch):
+    usage_calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.requests.post",
+        lambda *args, **kwargs: FakeStreamResponse(),
+    )
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase",
+        lambda *args, **kwargs: [{"allowed": True}],
+    )
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase_as_service_role",
+        lambda endpoint, method="GET", json_data=None, params=None: usage_calls.append({
+            "endpoint": endpoint,
+            "method": method,
+            "json_data": json_data,
+        }),
+    )
+
+    client = ChatbotLLMClient()
+    result = client.stream_reply(
+        system_prompt="시스템",
+        user_message="질문",
+        user_id="user-1",
+        auth_header=auth_header(),
+        function_schemas=[],
+        history=[],
+        on_delta=lambda text: None,
+        request_id="request-stream",
+    )
+
+    assert result["usage"]["total_tokens"] == 21
+    assert usage_calls[0]["json_data"] == {
+        "user_id": "user-1",
+        "request_id": "request-stream",
+        "request_type": "chat_stream",
+        "model": client.model,
+        "prompt_tokens": 13,
+        "completion_tokens": 8,
+        "total_tokens": 21,
+    }
+
+
+def test_usage_logging_failure_warns_without_failing_reply(monkeypatch, caplog):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
         "backend.services.chatbot.llm_client.requests.post",
         lambda *args, **kwargs: FakeResponse(),
     )
 
-    def fake_query(auth_header, endpoint, method="GET", json_data=None, params=None, extra_headers=None):
-        if endpoint == "rpc/consume_chatbot_usage":
-            return [{"allowed": True}]
-        raise RuntimeError("Supabase unavailable")
-
-    monkeypatch.setattr("backend.services.chatbot.llm_client.query_supabase", fake_query)
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase",
+        lambda *args, **kwargs: [{"allowed": True}],
+    )
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase_as_service_role",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("raw provider payload secret")),
+    )
 
     client = ChatbotLLMClient()
-    result = client.generate_reply(
-        system_prompt="시스템",
-        user_message="질문",
-        user_id="user-1",
-        auth_header="Bearer test",
-    )
+    with caplog.at_level(logging.WARNING, logger="backend.services.chatbot.llm_client"):
+        result = client.generate_reply(
+            system_prompt="시스템",
+            user_message="질문",
+            user_id="user-1",
+            auth_header=auth_header(),
+            request_id="request-failure",
+        )
 
     assert result["reply"] == "응답"
     assert result["usage"]["total_tokens"] == 18
+    assert "request_type=chat_reply" in caplog.text
+    assert "user_id=user-1" in caplog.text
+    assert "request_id=request-failure" in caplog.text
+    assert "raw provider payload secret" not in caplog.text
+
+
+def test_usage_logging_rejects_user_id_that_does_not_match_authenticated_subject(monkeypatch):
+    usage_calls = []
+    monkeypatch.setattr(
+        "backend.services.chatbot.llm_client.query_supabase_as_service_role",
+        lambda *args, **kwargs: usage_calls.append((args, kwargs)),
+    )
+
+    client = ChatbotLLMClient()
+    client._record_actual_usage(
+        auth_header=auth_header("user-1"),
+        user_id="user-2",
+        usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        request_type="chat_reply",
+        request_id="request-mismatch",
+    )
+
+    assert usage_calls == []

@@ -1,14 +1,17 @@
 import os
 import json
+import logging
 from datetime import date
 from typing import Callable
 
 import requests
 
-from backend.services.supabase_client import query_supabase
+from backend.services.auth_service import get_user_id_from_header
+from backend.services.supabase_client import query_supabase, query_supabase_as_service_role
 
 
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
+logger = logging.getLogger(__name__)
 
 
 class ChatbotLimitError(Exception):
@@ -94,20 +97,44 @@ class ChatbotLLMClient:
         user_id: str | None,
         usage: dict | None,
         request_type: str,
+        request_id: str | None = None,
     ) -> None:
         normalized = self._normalize_usage(usage)
-        if not auth_header or not user_id or not normalized:
+        authenticated_user_id = str(user_id or "").strip()
+        if not auth_header or not authenticated_user_id or not normalized:
+            return
+        try:
+            token_user_id, _ = get_user_id_from_header(auth_header)
+        except Exception:
+            return
+        if str(token_user_id).strip() != authenticated_user_id:
             return
 
+        normalized_request_type = str(request_type or "chat_reply").strip() or "chat_reply"
+        normalized_request_id = str(request_id or "").strip() or None
         payload = {
-            "user_id": user_id,
-            "request_type": str(request_type or "chat_reply").strip() or "chat_reply",
+            "user_id": authenticated_user_id,
+            "request_type": normalized_request_type,
             "model": self.model,
             **normalized,
         }
+        if normalized_request_id:
+            payload["request_id"] = normalized_request_id
         try:
-            query_supabase(auth_header, "chatbot_token_usage_logs", "POST", json_data=payload)
+            query_supabase_as_service_role(
+                "chatbot_token_usage_logs",
+                "POST",
+                json_data=payload,
+            )
         except Exception:
+            safe_user_id = authenticated_user_id.replace("\r", "").replace("\n", "")[:128]
+            safe_request_id = (normalized_request_id or "-").replace("\r", "").replace("\n", "")[:128]
+            logger.warning(
+                "챗봇 실제 토큰 사용량 저장 실패: request_type=%s user_id=%s request_id=%s",
+                normalized_request_type,
+                safe_user_id,
+                safe_request_id,
+            )
             return
 
     def _to_openai_tools(self, function_schemas: list[dict] | None) -> list[dict]:
@@ -179,6 +206,7 @@ class ChatbotLLMClient:
         auth_header: str | None = None,
         function_schemas: list[dict] | None = None,
         history: list[dict] | None = None,
+        request_id: str | None = None,
     ) -> dict:
         payload = self._build_request_payload(
             system_prompt=system_prompt,
@@ -216,6 +244,7 @@ class ChatbotLLMClient:
             user_id=user_id,
             usage=usage,
             request_type="chat_reply",
+            request_id=request_id,
         )
 
         return {
@@ -250,6 +279,7 @@ class ChatbotLLMClient:
         tool_data: dict | None,
         user_id: str | None = None,
         auth_header: str | None = None,
+        request_id: str | None = None,
     ) -> dict:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
@@ -315,6 +345,7 @@ class ChatbotLLMClient:
             user_id=user_id,
             usage=usage,
             request_type="tool_synthesis",
+            request_id=request_id,
         )
 
         return {
@@ -333,6 +364,7 @@ class ChatbotLLMClient:
         function_schemas: list[dict] | None,
         history: list[dict] | None,
         on_delta: Callable[[str], None],
+        request_id: str | None = None,
     ) -> dict:
         payload = {
             **self._build_request_payload(
@@ -451,6 +483,7 @@ class ChatbotLLMClient:
             user_id=user_id,
             usage=usage,
             request_type="chat_stream",
+            request_id=request_id,
         )
         return {
             "reply": reply_text,

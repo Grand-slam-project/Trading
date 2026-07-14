@@ -479,10 +479,15 @@ erDiagram
     *   `created_at` (TIMESTAMPTZ)
 *   **보안 원칙**:
     *   대화 원문, tool payload, 계좌 정보, API 키, 거래소 raw 응답은 저장하지 않습니다.
+    *   실제 사용량 로그는 Flask가 인증된 `user_id`를 확인한 뒤 `service_role`로만 생성하는 서버 작성 감사 데이터입니다.
     *   관리자 전체 집계는 백엔드 service role 기반 `/api/admin/users` 계열 API에서만 제공합니다.
+*   **관리자 RPC**:
+    *   `admin_list_user_token_usage()`가 검색, 정렬, 전체 요약, 페이지 제한을 DB에서 처리합니다.
+    *   `admin_get_user_token_usage()`가 일별/요청 유형별 집계와 최근 로그 제한을 DB에서 처리합니다.
+    *   두 RPC는 `SECURITY INVOKER`로 실행하며 `service_role`만 호출할 수 있습니다. `today` 및 일별 버킷은 UTC 날짜 경계를 사용합니다.
 *   **RLS**:
-    *   `authenticated` 사용자는 `auth.uid() = user_id`인 자신의 실제 토큰 로그만 조회·생성할 수 있습니다.
-    *   일반 사용자는 다른 사용자의 로그를 조회하거나 수정·삭제할 수 없습니다.
+    *   `authenticated` 사용자는 `auth.uid() = user_id`인 자신의 실제 토큰 로그만 조회할 수 있습니다.
+    *   일반 사용자의 삽입·수정·삭제 권한은 회수하며, 다른 사용자의 로그도 조회할 수 없습니다.
 
 ### 2.18 user_knowledge_notes
 *   **용도**: 앱 내부 투자노트와 Obsidian 플러그인에서 동기화한 Markdown 노트를 사용자별로 저장합니다. 현재 1차 구현은 원문 저장과 해시 기반 변경 감지만 담당하며, 후속 단계에서 `knowledge_chunks`/vector 검색으로 확장합니다.
