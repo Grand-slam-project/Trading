@@ -144,6 +144,7 @@ npm run build
 - 2026-07-15 AssetDetail 1차 리팩토링: 공통 순수 유틸을 `frontend/src/pages/assetDetailModel.js`로 분리하고 명확한 dead code warning을 제거했습니다. 전체 lint 상태는 `0 errors`, `109 warnings`입니다.
 - 2026-07-15 Dashboard 1차 리팩토링: 데스크톱/모바일 대시보드 공통 순수 유틸을 `frontend/src/pages/dashboardModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
 - 2026-07-15 AdminMlData 1차 리팩토링: 데스크톱/모바일 ML 관리자 공통 순수 유틸을 `frontend/src/pages/adminMlDataModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
+- 2026-07-15 TradeHistory 1차 리팩토링: 데스크톱/모바일 거래내역 공통 순수 유틸을 `frontend/src/pages/tradeHistoryModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
 
 ## 주요 API
 

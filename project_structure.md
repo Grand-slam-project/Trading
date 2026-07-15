@@ -231,6 +231,8 @@ frontend/
         ├── Settings.jsx
         ├── Signup.jsx
         ├── TradeHistoryTab.jsx
+        ├── tradeHistoryModel.js
+        ├── tradeHistoryModel.test.mjs
         ├── WatchlistTab.jsx
         └── mobile/
 ```
@@ -273,6 +275,12 @@ frontend/
   - 관리자 유저 관리 탭의 데스크톱/반응형 UI
   - UTC 기준 실제 챗봇 토큰 사용량 집계와 사용자별 사용 내역을 조회
   - 현재 기본 모델 `gpt-4.1-mini` 가격 기준으로 통산/30일/유저별/요청별 예상 비용을 추정 표시
+- `TradeHistoryTab.jsx`
+  - 거래 제안, 브로커 원장, 자산이동 내역을 통합 표시하는 데스크톱 거래내역 탭
+- `tradeHistoryModel.js`
+  - `TradeHistoryTab.jsx`와 `MobileTradeHistoryTab.jsx`가 공유하는 거래 상태 라벨, 금액/수량 포맷, 브로커 원장 연결, 자산이동 행 변환 순수 유틸
+- `tradeHistoryModel.test.mjs`
+  - `tradeHistoryModel.js`의 순수 함수 Node test
 - `supabaseClient.js`, `lib/supabaseClient.js`
   - Supabase 초기화 경로가 2개 존재
   - 향후 통합 시 import 호출부 전수 확인이 필요
