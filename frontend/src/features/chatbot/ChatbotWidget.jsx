@@ -8,6 +8,7 @@ import { buildDisclosurePresentation } from './chatbotDisclosurePresentation'
 import { shouldSubmitChatbotInput } from './chatbotInput'
 import { buildMlRecommendationPresentation } from './chatbotMlRecommendationPresentation'
 import { buildNewsPresentation } from './chatbotNewsPresentation'
+import { normalizeOrderFormPrefill } from './chatbotOrderForm'
 import {
   buildProposalPrecheckSummary,
   isChatbotApprovalProposal,
@@ -569,14 +570,16 @@ function DisclosureResults({ presentation }) {
   )
 }
 
-function ChatOrderForm({ onClose, onSubmit }) {
-  const [exchange, setExchange] = useState('TOSS')
-  const [brokerEnv, setBrokerEnv] = useState('REAL')
-  const [side, setSide] = useState('BUY')
-  const [symbolQuery, setSymbolQuery] = useState('')
-  const [quantity, setQuantity] = useState('1')
-  const [orderType, setOrderType] = useState('LIMIT')
-  const [price, setPrice] = useState('')
+function ChatOrderForm({ initialValues, onClose, onSubmit }) {
+  const [initialForm] = useState(() => normalizeOrderFormPrefill(initialValues))
+  const [exchange, setExchange] = useState(initialForm.exchange)
+  const [brokerEnv, setBrokerEnv] = useState(initialForm.broker_env)
+  const [side, setSide] = useState(initialForm.side)
+  const [symbolQuery, setSymbolQuery] = useState(initialForm.symbol_query)
+  const [quantity, setQuantity] = useState(initialForm.quantity)
+  const [orderType, setOrderType] = useState(initialForm.order_type)
+  const [price, setPrice] = useState(initialForm.price)
+  const [formError, setFormError] = useState('')
 
   const [isConditional, setIsConditional] = useState(false)
   const [conditionalCategory, setConditionalCategory] = useState('SELL_STOP_LIMIT') // SELL_STOP_LIMIT, BUY_TRIGGER
@@ -584,24 +587,30 @@ function ChatOrderForm({ onClose, onSubmit }) {
   const [stopLossRate, setStopLossRate] = useState('-3')
   const [buyTriggerPrice, setBuyTriggerPrice] = useState('')
   const [conditionalMode, setConditionalMode] = useState('PROPOSAL')
+  const hasPrefill = Object.values(initialForm).some(Boolean)
 
   const handleSubmitForm = (e) => {
     e.preventDefault()
+    setFormError('')
+    if (!exchange || !brokerEnv || !side || !orderType) {
+      setFormError('거래소, 환경, 매매 구분, 주문 유형을 모두 확인해 주세요.')
+      return
+    }
     if (!symbolQuery.trim()) {
-      alert('종목명을 입력하세요.')
+      setFormError('종목명이나 종목코드를 입력해 주세요.')
       return
     }
     const qtyVal = parseFloat(quantity)
-    if (isNaN(qtyVal) || qtyVal <= 0) {
-      alert('올바른 수량을 입력하세요.')
+    if (Number.isNaN(qtyVal) || qtyVal <= 0) {
+      setFormError('0보다 큰 수량을 입력해 주세요.')
       return
     }
 
     let priceVal = null
     if (orderType === 'LIMIT') {
       priceVal = parseFloat(price)
-      if (isNaN(priceVal) || priceVal <= 0) {
-        alert('올바른 지정가를 입력하세요.')
+      if (Number.isNaN(priceVal) || priceVal <= 0) {
+        setFormError('0보다 큰 지정가를 입력해 주세요.')
         return
       }
     }
@@ -614,16 +623,16 @@ function ChatOrderForm({ onClose, onSubmit }) {
     if (isConditional) {
       if (conditionalCategory === 'BUY_TRIGGER') {
         condPriceVal = parseFloat(buyTriggerPrice)
-        if (isNaN(condPriceVal) || condPriceVal <= 0) {
-          alert('올바른 조건매수 가격을 입력하세요.')
+        if (Number.isNaN(condPriceVal) || condPriceVal <= 0) {
+          setFormError('0보다 큰 조건매수 가격을 입력해 주세요.')
           return
         }
         condType = 'BUY_LIMIT'
       } else {
         profitRateVal = parseFloat(targetProfitRate)
         lossRateVal = parseFloat(stopLossRate)
-        if (isNaN(profitRateVal) || isNaN(lossRateVal)) {
-          alert('올바른 익절/손절 비율을 입력하세요.')
+        if (Number.isNaN(profitRateVal) || Number.isNaN(lossRateVal)) {
+          setFormError('익절과 손절 비율을 숫자로 입력해 주세요.')
           return
         }
         condType = 'STOP_LIMIT'
@@ -654,9 +663,15 @@ function ChatOrderForm({ onClose, onSubmit }) {
   return (
     <form onSubmit={handleSubmitForm} className="space-y-2 rounded-lg border border-slate-700 bg-slate-900/90 p-3.5 text-xs text-slate-100 backdrop-blur-md">
       <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-        <h3 className="font-bold text-ai-cyan">반자율 주문 제안 생성기</h3>
+        <h3 className="font-bold text-ai-cyan">매매 요청 확인</h3>
         <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-200">닫기</button>
       </div>
+
+      {hasPrefill && (
+        <p className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-4 text-amber-100">
+          챗봇이 인식한 임시 입력값입니다. 제출 전에 모든 항목을 확인해 주세요.
+        </p>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <div>
@@ -675,6 +690,7 @@ function ChatOrderForm({ onClose, onSubmit }) {
             }}
             className="w-full rounded border border-slate-700 bg-slate-950 p-1 text-slate-200 outline-none focus:border-ai-cyan"
           >
+            <option value="">거래소 선택</option>
             <option value="TOSS">TOSS (주식)</option>
             <option value="COINONE">COINONE (코인)</option>
             <option value="KIS">한국투자증권</option>
@@ -690,6 +706,7 @@ function ChatOrderForm({ onClose, onSubmit }) {
             onChange={(e) => setBrokerEnv(e.target.value)}
             className="w-full rounded border border-slate-700 bg-slate-950 p-1 text-slate-200 outline-none focus:border-ai-cyan disabled:cursor-not-allowed disabled:opacity-50"
           >
+            <option value="">환경 선택</option>
             <option value="REAL">실제투자 (REAL)</option>
             <option value="MOCK">모의투자 (MOCK)</option>
           </select>
@@ -862,6 +879,12 @@ function ChatOrderForm({ onClose, onSubmit }) {
         </div>
       )}
 
+      {formError && (
+        <p role="alert" className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-[10px] leading-4 text-rose-100">
+          {formError}
+        </p>
+      )}
+
       <button
         type="submit"
         className="w-full rounded bg-ai-cyan py-1.5 text-xs font-bold text-[#07111f] transition hover:brightness-110"
@@ -886,6 +909,8 @@ export default function ChatbotWidget({
   const [input, setInput] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [showOrderForm, setShowOrderForm] = useState(false)
+  const [orderFormInitialValues, setOrderFormInitialValues] = useState(() => normalizeOrderFormPrefill())
+  const [orderFormRevision, setOrderFormRevision] = useState(0)
   const [pendingProposals, setPendingProposals] = useState([])
   const [proposalActionId, setProposalActionId] = useState('')
   const widgetInstanceId = useId()
@@ -1062,10 +1087,26 @@ export default function ChatbotWidget({
   }
 
   const handleAction = (action) => {
+    if (action?.type === 'open_order_form') {
+      setOrderFormInitialValues(normalizeOrderFormPrefill(action.prefill))
+      setOrderFormRevision((revision) => revision + 1)
+      setShowOrderForm(true)
+      return
+    }
     if (action?.type === 'navigate' && action.to) {
       navigate(action.to)
       if (!isMobilePage) closeChat()
     }
+  }
+
+  const toggleEmptyOrderForm = () => {
+    if (showOrderForm) {
+      setShowOrderForm(false)
+      return
+    }
+    setOrderFormInitialValues(normalizeOrderFormPrefill())
+    setOrderFormRevision((revision) => revision + 1)
+    setShowOrderForm(true)
   }
 
   const nextMessageId = (role) => {
@@ -1347,7 +1388,7 @@ export default function ChatbotWidget({
                   {isLoggedIn ? (
                     <button
                       type="button"
-                      onClick={() => setShowOrderForm((prev) => !prev)}
+                      onClick={toggleEmptyOrderForm}
                       disabled={isSending}
                       className="h-10 shrink-0 rounded-full border border-ai-cyan/60 bg-ai-cyan/10 px-3 text-xs font-bold text-ai-cyan transition active:bg-ai-cyan active:text-[#07111f] disabled:opacity-50"
                       aria-label="매매 요청 폼 열기"
@@ -1381,7 +1422,7 @@ export default function ChatbotWidget({
                   {isLoggedIn ? (
                     <button
                       type="button"
-                      onClick={() => setShowOrderForm((prev) => !prev)}
+                      onClick={toggleEmptyOrderForm}
                       disabled={isSending}
                       className="h-8 rounded border border-ai-cyan/60 bg-ai-cyan/10 px-3 text-xs font-bold text-ai-cyan transition hover:bg-ai-cyan hover:text-[#07111f] disabled:opacity-50"
                       aria-label="매매 요청 폼 열기"
@@ -1439,26 +1480,14 @@ export default function ChatbotWidget({
             {showOrderForm && (
               <div className="mb-3 max-h-[320px] overflow-y-auto rounded-lg border border-slate-800 bg-[#070b14]/90 p-0.5">
                 <ChatOrderForm
+                  key={orderFormRevision}
+                  initialValues={orderFormInitialValues}
                   onClose={() => setShowOrderForm(false)}
                   onSubmit={handleFormSubmit}
                 />
               </div>
             )}
             <form onSubmit={handleSubmit} className={isMobilePage ? 'flex items-center gap-3' : 'flex items-end gap-2'}>
-              {isMobilePage ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setIsQuickMenuOpen((open) => !open)}
-                    className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-slate-400 transition active:bg-ai-cyan/10 active:text-ai-cyan"
-                    aria-label={isQuickMenuOpen ? 'Close chatbot categories' : 'Open chatbot categories'}
-                    aria-expanded={isQuickMenuOpen}
-                  >
-                    <span className="material-symbols-outlined text-[34px] leading-none">menu</span>
-                  </button>
-                  <div className="h-12 w-px shrink-0 bg-slate-700" aria-hidden="true" />
-                </>
-              ) : null}
               <textarea
                 ref={inputRef}
                 value={input}
