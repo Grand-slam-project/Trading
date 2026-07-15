@@ -4,7 +4,7 @@ import { supabase } from '../supabaseClient'
 import AdminInquiries from './AdminInquiries.jsx'
 import AdminUsers from './AdminUsers.jsx'
 import AdminSymbolReconciliation from './AdminSymbolReconciliation.jsx'
-import { AuditBadge, GuardSummary, JobLogModal, StatusPanel, VersionDeltaPanel } from './adminMlDataPanels.jsx'
+import { ActiveSignalPanel, AuditBadge, GuardSummary, JobLogModal, StatusPanel, VersionDeltaPanel } from './adminMlDataPanels.jsx'
 import {
   buildQualityDetail,
   findGuardCheck,
@@ -14,12 +14,9 @@ import {
   formatPathInText,
   formatPercent,
   formatReturnPercent,
-  formatStaleness,
   formatTime,
   formatTrustValue,
   formatVersionBacktest,
-  getSignalGradeLabel,
-  getSignalGradeTone,
   getSimpleGuardStatus,
   legacyAutomationPresets,
   operationalAutomationPresets,
@@ -231,204 +228,6 @@ function V8OptunaPanel({
           {message}
         </div>
       ) : null}
-    </section>
-  )
-}
-
-function ActiveSignalPanel({ title, data, loading, error, guardReport, onRefresh }) {
-  const overview = data?.overview
-  const filteredOverview = data?.filtered_overview
-  const performance = data?.performance
-  const predictions = data?.predictions || []
-  const gradeCounts = filteredOverview?.grade_counts || overview?.grade_counts || {}
-
-  return (
-    <section className="rounded-lg border border-slate-700/80 bg-slate-surface p-5">
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-ai-cyan">Active Signals</p>
-          <h2 className="mt-1 text-xl font-bold text-white">{title}</h2>
-        </div>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={loading}
-          className="w-full rounded border border-slate-700 px-4 py-2 text-xs font-bold text-slate-300 transition hover:border-ai-cyan hover:text-white disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
-        >
-          {loading ? '불러오는 중' : '신호 새로고침'}
-        </button>
-      </div>
-
-      {loading ? (
-        <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-sm text-slate-400">
-          활성 신호를 불러오는 중입니다.
-        </div>
-      ) : error ? (
-        <div className="space-y-3">
-          <div className="rounded-lg border border-amber-800 bg-amber-950/20 p-4 text-sm leading-6 text-amber-200">
-            {error}
-          </div>
-          {guardReport ? (
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">차단 사유</p>
-              <GuardSummary guardReport={guardReport} compact />
-            </div>
-          ) : null}
-        </div>
-      ) : !data ? (
-        <div className="space-y-3">
-          <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-sm text-slate-400">
-            아직 활성 신호 데이터가 없습니다.
-          </div>
-          {guardReport ? (
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">현재 검증 상태</p>
-              <GuardSummary guardReport={guardReport} compact />
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-            <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">승격 검증 요약</p>
-            <GuardSummary guardReport={guardReport} compact />
-          </div>
-
-          <div className="flex flex-wrap gap-2 text-[10px]">
-            <span className="rounded border border-fuchsia-500/30 px-2 py-1 font-bold text-fuchsia-300">SERVING {data.serving_version || '-'}</span>
-            <span className="rounded border border-emerald-500/30 px-2 py-1 font-bold text-emerald-300">PICK {data.recommended_version || '-'}</span>
-            <span className="rounded border border-slate-600 px-2 py-1 font-bold text-slate-300">LATEST {data.latest_version || '-'}</span>
-            <span className="rounded border border-ai-cyan/30 px-2 py-1 font-bold text-ai-cyan">{data.model_version || '-'}</span>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-3">
-              <p className="text-[10px] text-slate-500">전체 예측 수</p>
-              <p className="mt-1 font-mono text-lg font-bold text-white">{overview?.total_predictions ?? 0}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-3">
-              <p className="text-[10px] text-slate-500">LONG / HOLD / SHORT</p>
-              <p className="mt-1 font-mono text-sm font-bold text-white">
-                {overview?.long_count ?? 0} / {overview?.hold_count ?? 0} / {overview?.short_count ?? 0}
-              </p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-3">
-              <p className="text-[10px] text-slate-500">평균 상승 확률</p>
-              <p className="mt-1 font-mono text-lg font-bold text-emerald-300">{formatPercent(filteredOverview?.avg_up_probability)}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-3">
-              <p className="text-[10px] text-slate-500">평균 하락 위험</p>
-              <p className="mt-1 font-mono text-lg font-bold text-amber-300">{formatPercent(filteredOverview?.avg_risk_probability)}</p>
-            </div>
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-lg border border-emerald-500/20 bg-emerald-950/10 p-3">
-              <p className="text-[10px] text-emerald-300">강한 후보</p>
-              <p className="mt-1 font-mono text-lg font-bold text-white">{gradeCounts.strong_buy_candidate ?? 0}</p>
-            </div>
-            <div className="rounded-lg border border-ai-cyan/20 bg-ai-cyan/5 p-3">
-              <p className="text-[10px] text-ai-cyan">관찰</p>
-              <p className="mt-1 font-mono text-lg font-bold text-white">{gradeCounts.watch ?? 0}</p>
-            </div>
-            <div className="rounded-lg border border-rose-500/20 bg-rose-950/10 p-3">
-              <p className="text-[10px] text-rose-300">위험</p>
-              <p className="mt-1 font-mono text-lg font-bold text-white">{gradeCounts.risky ?? 0}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-3">
-              <p className="text-[10px] text-slate-500">신호 없음</p>
-              <p className="mt-1 font-mono text-lg font-bold text-white">{gradeCounts.no_signal ?? 0}</p>
-            </div>
-          </div>
-
-          <div className="grid gap-3 xl:grid-cols-2">
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">성능 스냅샷</p>
-              <div className="mt-3 grid gap-2 text-xs text-slate-300">
-                <p>시계열 CV 구분력: <span className="font-mono text-white">{formatMetric(performance?.cv_roc_auc)}</span></p>
-                <p>상위 10% 적중: <span className="font-mono text-white">{formatMetric(performance?.precision_at_top_10pct)}</span></p>
-                <p>하락 구분력: <span className="font-mono text-white">{formatMetric(performance?.risk_cv_roc_auc)}</span></p>
-                <p>복합 초과수익(순): <span className="font-mono text-ai-cyan">{formatReturnPercent(performance?.composite_excess_return_net)}</span></p>
-                <p>복합 적중률: <span className="font-mono text-white">{formatMetric(performance?.composite_precision_at_top_n)}</span></p>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">현재 필터 결과</p>
-              <div className="mt-3 grid gap-2 text-xs text-slate-300">
-                <p>표시 개수: <span className="font-mono text-white">{predictions.length}</span></p>
-                <p>최대 점수: <span className="font-mono text-white">{formatMetric(filteredOverview?.max_signal_score)}</span></p>
-                <p>최소 점수: <span className="font-mono text-white">{formatMetric(filteredOverview?.min_signal_score)}</span></p>
-                <p>평균 점수: <span className="font-mono text-white">{formatMetric(filteredOverview?.avg_signal_score)}</span></p>
-                <p>마지막 예측 시각: <span className="font-mono break-all text-white">{filteredOverview?.latest_prediction_time || overview?.latest_prediction_time || '-'}</span></p>
-              </div>
-            </div>
-          </div>
-
-          {predictions.length ? (
-            <div className="grid gap-2">
-              {predictions.slice(0, 8).map((row) => (
-                <div
-                  key={`${data.asset_type}-${row.symbol}-${row.date}`}
-                  className="grid gap-3 rounded-lg border border-slate-800 bg-[#0f172a] p-3 sm:grid-cols-[1fr_auto_auto_auto]"
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="break-words text-sm font-bold text-white">{row.display_name || row.symbol}</p>
-                      {row.position ? (
-                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-black tracking-widest ${
-                          row.position === 'SHORT'
-                            ? 'bg-rose-950/80 text-rose-300 border border-rose-700/60'
-                            : row.position === 'LONG'
-                              ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/60'
-                              : 'bg-slate-900/80 text-slate-300 border border-slate-700/60'
-                        }`}>
-                          {row.position}
-                        </span>
-                      ) : null}
-                      <span className={`rounded border px-1.5 py-0.5 text-[9px] font-black tracking-widest ${getSignalGradeTone(row.signal_grade)}`}>
-                        {getSignalGradeLabel(row.signal_grade)}
-                      </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1.5">
-                      <span className="rounded border border-slate-700 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-                        {row.symbol}
-                      </span>
-                      {row.market ? (
-                        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">
-                          {row.market}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-1 break-words text-xs text-slate-500">
-                      {row.reason_summary || row.date}
-                    </p>
-                    <p className="mt-1 font-mono text-[10px] text-slate-600">
-                      예측 {formatStaleness(row.staleness_minutes)} · {row.predicted_at || row.date || '-'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">상승 확률</p>
-                    <p className="font-mono text-sm text-emerald-300">{formatPercent(row.up_probability)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">하락 위험</p>
-                    <p className="font-mono text-sm text-amber-300">{formatPercent(row.risk_probability)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">복합 점수</p>
-                    <p className="font-mono text-sm text-ai-cyan">{formatMetric(row.signal_score)}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-sm text-slate-400">
-              현재 필터에 맞는 활성 신호가 없습니다.
-            </div>
-          )}
-        </div>
-      )}
     </section>
   )
 }
