@@ -164,6 +164,7 @@ npm run build
 - 2026-07-15 AssetDetail 3차 리팩토링: 데스크톱/모바일 종목 상세의 뉴스·공시·ML 지표·캔들 포맷 순수 유틸을 `assetDetailModel.js`로 이동하고 Node test를 보강했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 4,824줄, `MobileAssetDetail.jsx`는 4,812줄입니다.
 - 2026-07-15 AdminMlData 2차 리팩토링: 데스크톱/모바일 ML 관리자 화면의 공통 수집 상태 패널을 `frontend/src/pages/adminMlDataPanels.jsx`로 분리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,963줄, `MobileAdminMlData.jsx`는 2,924줄입니다.
 - 2026-07-15 AdminMlData 3차 리팩토링: ML 관리자 작업 로그 모달, 승격 검증 요약, 감사 배지를 `adminMlDataPanels.jsx`로 공통화하고 로그 복사 문자열 생성을 `adminMlDataModel.js`로 분리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,803줄, `MobileAdminMlData.jsx`는 2,764줄입니다.
+- 2026-07-15 AdminMlData 4차 리팩토링: 데스크톱/모바일 ML 관리자 버전 차이 요약 패널을 `adminMlDataPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,745줄, `MobileAdminMlData.jsx`는 2,706줄입니다.
 
 ## 주요 API
 
