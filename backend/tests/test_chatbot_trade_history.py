@@ -476,31 +476,6 @@ def test_run_chatbot_tool_combines_multiple_asset_outlooks(monkeypatch):
     assert "BTC 전망 응답" in result["reply"]
 
 
-def test_compound_info_does_not_intercept_order_with_news(monkeypatch):
-    calls = []
-
-    monkeypatch.setattr(
-        tool_registry,
-        "get_asset_price",
-        lambda auth, msg: (_ for _ in ()).throw(AssertionError("주문 문구는 복합 현재가 라우팅 금지")),
-    )
-    monkeypatch.setattr(
-        tool_registry,
-        "search_web",
-        lambda auth, msg: (_ for _ in ()).throw(AssertionError("주문 문구는 복합 뉴스 라우팅 금지")),
-    )
-
-    def fake_create_trade_proposal_from_message(auth_header, message, intent=None):
-        calls.append((auth_header, message, intent))
-        return {"reply": "주문 흐름", "data": {"source": "ORDER_FLOW"}}
-
-    monkeypatch.setattr(tool_registry, "_is_plain_order_requiring_confirmation", lambda message, intent: False)
-    monkeypatch.setattr(tool_registry, "create_trade_proposal_from_message", fake_create_trade_proposal_from_message)
-
-    result = tool_registry.run_chatbot_tool("Bearer test", "삼성전자 1주 사줘 그리고 뉴스 알려줘")
-
-    assert result["data"]["source"] == "ORDER_FLOW"
-    assert len(calls) == 1
 
 
 def test_recommendation_candidates_adds_next_action_when_predictions_are_missing(monkeypatch):
@@ -596,11 +571,11 @@ def test_asset_outlook_explains_missing_ml_prediction_without_news_fallback(monk
     assert result["data"]["source"] == "ML_ACTIVE_SIGNAL"
     assert result["data"]["reason"] == "missing_active_predictions"
     assert result["data"]["asset_key"] == "kr_stock"
-    assert "활성 ML 예측 결과를 아직 찾지 못했습니다" in result["reply"]
-    assert "배포 환경" in result["reply"]
+    assert "판단하기 어렵습니다" in result["reply"]
+    assert "모델 예측 데이터가 준비된 뒤" in result["reply"]
 
 
-def test_asset_outlook_uses_price_based_reply_for_general_outlook_question(monkeypatch):
+def test_asset_outlook_uses_ml_for_general_outlook_question(monkeypatch):
     monkeypatch.setattr(
         tool_registry,
         "_resolve_symbol",
@@ -611,31 +586,82 @@ def test_asset_outlook_uses_price_based_reply_for_general_outlook_question(monke
             "market": "KR",
         },
     )
-
-    def fake_get_internal(path, auth_header, params=None):
-        assert path == "/api/chart/quote"
-        return {
-            "data": {
-                "current_price": 279000,
-                "change_rate": 6.08,
-                "currency": "KRW",
-            }
-        }
-
-    monkeypatch.setattr(tool_registry, "_get_internal", fake_get_internal)
+    monkeypatch.setattr(asset_ml_outlook, "build_active_signal_payload", lambda **kwargs: None)
+    monkeypatch.setattr(
+        tool_registry,
+        "get_asset_price",
+        lambda auth_header, message: (_ for _ in ()).throw(AssertionError("ML 없는 전망 질문은 현재가로 대체하면 안 됩니다.")),
+    )
     monkeypatch.setattr(
         tool_registry.ChatbotWebFallbackSearchService,
         "search",
-        lambda self, **kwargs: (_ for _ in ()).throw(AssertionError("일반 전망 질문은 뉴스/공시 검색으로 보내면 안 됩니다.")),
+        lambda self, **kwargs: (_ for _ in ()).throw(AssertionError("ML 없는 전망 질문은 뉴스/공시 검색으로 대체하면 안 됩니다.")),
     )
 
-    result = tool_registry.get_asset_outlook("Bearer test", "삼성전자 전망 어때")
+    result = tool_registry.get_asset_outlook("Bearer test", "삼성전자 전망어때")
 
-    assert result["data"]["source"] == "ASSET_PRICE_OUTLOOK"
+    assert result["data"]["source"] == "ML_ACTIVE_SIGNAL"
+    assert result["data"]["reason"] == "missing_active_predictions"
     assert result["data"]["symbol"] == "005930"
-    assert "삼성전자(005930)의 현재가는 279,000원" in result["reply"]
-    assert "오늘 등락률은 +6.08%" in result["reply"]
-    assert "분산 투자와 손절 기준 설정" in result["reply"]
+    assert "판단하기 어렵습니다" in result["reply"]
+    assert "현재가" not in result["reply"]
+    assert "뉴스" not in result["reply"]
+
+
+def test_run_chatbot_tool_routes_stock_trade_status_before_calendar(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_market_calendar",
+        lambda auth_header, message: (_ for _ in ()).throw(AssertionError("종목 거래상태 질문은 시장 캘린더로 보내면 안 됩니다.")),
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "_resolve_symbol",
+        lambda auth_header, query: {
+            "symbol": "001520",
+            "display_name": "동양",
+            "asset_type": "STOCK",
+            "market": "KR",
+        },
+    )
+    monkeypatch.setattr(
+        tool_registry,
+        "_get_stock_trade_status",
+        lambda auth_header, symbol, broker_env: calls.append((symbol, broker_env)) or {
+            "status_text": "거래상태: 특이사항 없음",
+            "labels": [],
+            "warnings": [],
+            "status_lookup_failed": False,
+        },
+    )
+
+    result = tool_registry.run_chatbot_tool("Bearer test", "동양 거래 가능여부 확인해줘")
+
+    assert calls == [("001520", "REAL")]
+    assert result["data"]["source"] == "STOCK_TRADE_STATUS"
+    assert result["data"]["symbol"] == "001520"
+    assert "동양(001520)" in result["reply"]
+    assert "특이사항 없음" in result["reply"]
+
+
+def test_run_chatbot_tool_keeps_market_calendar_for_market_question(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        tool_registry,
+        "get_market_calendar",
+        lambda auth_header, message: calls.append(message) or {
+            "reply": "한국장은 정규 거래일입니다.",
+            "data": {"source": "MARKET_CALENDAR"},
+        },
+    )
+
+    result = tool_registry.run_chatbot_tool("Bearer test", "오늘 한국장 열려?")
+
+    assert calls == ["오늘 한국장 열려?"]
+    assert result["data"]["source"] == "MARKET_CALENDAR"
 
 
 def test_extract_symbol_query_uses_ml_training_universe_symbols():

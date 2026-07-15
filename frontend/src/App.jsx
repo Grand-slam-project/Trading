@@ -13,6 +13,7 @@ import AdminMlData from './pages/AdminMlData'
 import AssetDetail from './pages/AssetDetail'
 import SearchNotFound from './pages/SearchNotFound'
 import InvestmentSurveyModal from './components/InvestmentSurveyModal'
+import MemberOnlyNotice from './components/MemberOnlyNotice.jsx'
 import { INQUIRY_ROUTES } from './dashboardConstants.js'
 import ChatbotWidget from './features/chatbot/ChatbotWidget.jsx'
 import useDeviceType from './hooks/useDeviceType.js'
@@ -113,6 +114,13 @@ function AppShell({
     />
   ) : (
     <Navigate to="/login" replace />
+  )
+  const memberOnlyNoticeElement = (
+    <MemberOnlyNotice
+      isLoggedIn={isLoggedIn}
+      userEmail={userEmail}
+      handleLogout={handleLogout}
+    />
   )
 
   return (
@@ -221,7 +229,7 @@ function AppShell({
           />
           <Route
             path="/dashboard"
-            element={(
+            element={isLoggedIn ? (
               <Dashboard
                 isLoggedIn={isLoggedIn}
                 userEmail={userEmail}
@@ -229,7 +237,7 @@ function AppShell({
                 userProfile={userProfile}
                 setUserProfile={setUserProfile}
               />
-            )}
+            ) : memberOnlyNoticeElement}
           />
           <Route
             path="/market-rankings"
@@ -243,13 +251,13 @@ function AppShell({
           />
           <Route
             path="/news"
-            element={(
+            element={isLoggedIn ? (
               <News
                 isLoggedIn={isLoggedIn}
                 userEmail={userEmail}
                 handleLogout={handleLogout}
               />
-            )}
+            ) : memberOnlyNoticeElement}
           />
           {Object.values(INQUIRY_ROUTES).map((path) => (
             <Route key={path} path={path} element={protectedInquiryElement} />
