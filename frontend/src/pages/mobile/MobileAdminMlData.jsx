@@ -3,11 +3,10 @@ import Header from '../../components/Header.jsx'
 import { supabase } from '../../supabaseClient'
 import MobileAdminInquiries from './MobileAdminInquiries.jsx'
 import AdminSymbolReconciliation from '../AdminSymbolReconciliation.jsx'
-import { ActiveSignalPanel, AuditBadge, GuardSummary, JobLogModal, ServingAuditPanel, StatusPanel, VersionDeltaPanel } from '../adminMlDataPanels.jsx'
+import { ActiveSignalPanel, AuditBadge, GuardSummary, JobLogModal, ModelSwitchPanel, ServingAuditPanel, StatusPanel, VersionDeltaPanel } from '../adminMlDataPanels.jsx'
 import {
   buildQualityDetail,
   findGuardCheck,
-  findRegistryRow,
   formatMetric,
   formatPath,
   formatPathInText,
@@ -16,7 +15,6 @@ import {
   formatTime,
   formatTrustValue,
   formatVersionBacktest,
-  getSimpleGuardStatus,
   legacyAutomationPresets,
   operationalAutomationPresets,
   presets,
@@ -227,96 +225,6 @@ function V8OptunaPanel({
           {message}
         </div>
       ) : null}
-    </section>
-  )
-}
-
-function ModelSwitchPanel({ data, rowsByAsset, promotionChecks, loading, onActivate, activatingKey }) {
-  const reports = Object.values(data?.assets || {})
-
-  return (
-    <section className="rounded-lg border border-ai-cyan/30 bg-ai-cyan/5 p-5">
-      <div>
-        <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-ai-cyan">Model Switch</p>
-        <h2 className="mt-1 text-xl font-bold text-white">모델 교체 판단</h2>
-        <p className="mt-2 text-xs leading-5 text-slate-400">
-          자동학습 결과 중 추천 후보가 기준을 통과하면 여기에서 바로 서비스 모델로 바꿀 수 있습니다.
-        </p>
-      </div>
-
-      {loading ? (
-        <div className="mt-4 rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-sm text-slate-400">
-          모델 교체 정보를 불러오는 중입니다.
-        </div>
-      ) : !reports.length ? (
-        <div className="mt-4 rounded-lg border border-slate-800 bg-[#0f172a] p-4 text-sm text-slate-400">
-          아직 교체 판단에 사용할 서빙 감사 정보가 없습니다.
-        </div>
-      ) : (
-        <div className="mt-4 grid gap-3 lg:grid-cols-2">
-          {reports.map((report) => {
-            const recommendedVersion = report.recommended_model_version || report.recommended_version
-            const servingVersion = report.serving_model_version || report.serving_version
-            const recommendedRow = findRegistryRow(rowsByAsset, report.asset_type, recommendedVersion)
-            const guardReport = recommendedVersion ? promotionChecks?.[`${report.asset_type}:${recommendedVersion}`] : null
-            const guardStatus = getSimpleGuardStatus(guardReport)
-            const canActivate = Boolean(recommendedRow && !recommendedRow.is_serving)
-            const failedChecks = summarizeFailedChecks(guardReport, 2)
-
-            return (
-              <article key={report.asset_type} className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="text-sm font-bold text-white">{report.asset_type === 'STOCK' ? '주식 모델' : '코인 모델'}</p>
-                    <p className="mt-1 text-xs leading-5 text-slate-400">{report.message}</p>
-                  </div>
-                  <span className={`rounded border px-2 py-1 text-[10px] font-bold ${guardStatus.tone}`}>
-                    {guardStatus.label}
-                  </span>
-                </div>
-
-                <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
-                  <div className="rounded border border-slate-800 bg-black/15 p-3">
-                    <p className="text-[10px] text-slate-500">현재 사용 중</p>
-                    <p className="mt-1 break-all font-mono font-bold text-white">{servingVersion || '-'}</p>
-                  </div>
-                  <div className="rounded border border-slate-800 bg-black/15 p-3">
-                    <p className="text-[10px] text-slate-500">추천 후보</p>
-                    <p className="mt-1 break-all font-mono font-bold text-emerald-300">{recommendedVersion || '-'}</p>
-                  </div>
-                </div>
-
-                {failedChecks.length ? (
-                  <div className="mt-3 rounded border border-amber-500/30 bg-amber-950/10 px-3 py-2">
-                    {failedChecks.map((item) => (
-                      <p key={item} className="text-[10px] leading-5 text-amber-200">{item}</p>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-3 text-[10px] leading-5 text-slate-400">
-                    기준을 통과한 후보는 강제 옵션 없이 서비스 반영할 수 있습니다.
-                  </p>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => recommendedRow && onActivate?.(recommendedRow)}
-                  disabled={!canActivate || Boolean(activatingKey)}
-                  className="mt-4 w-full rounded border border-ai-cyan/40 px-3 py-2 text-xs font-bold text-ai-cyan transition hover:bg-ai-cyan/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
-                >
-                  {recommendedRow?.is_serving
-                    ? '이미 반영됨'
-                    : activatingKey === `${recommendedRow?.asset_type}:${recommendedRow?.model_version}`
-                      ? '반영 중...'
-                      : canActivate
-                        ? '추천 후보로 교체'
-                        : '교체 후보 없음'}
-                </button>
-              </article>
-            )
-          })}
-        </div>
-      )}
     </section>
   )
 }
