@@ -22,6 +22,10 @@ export function formatPathInText(text) {
   return formatted
 }
 
+export function buildJobLogClipboardText(job = {}) {
+  return `=== Job Log: ${job.label || job.id} ===\n\n[TRAINING AUDIT]\n${JSON.stringify(job.training_audit || null, null, 2)}\n\n[GUARD REPORT]\n${JSON.stringify(job.guard_report || null, null, 2)}\n\n[SERVING AUDIT]\n${JSON.stringify(job.serving_audit_report || null, null, 2)}\n\n[STDOUT]\n${job.stdout || 'No stdout'}\n\n[STDERR]\n${job.stderr || 'No stderr'}`
+}
+
 export const presets = {
   stock: {
     title: 'Toss 주식 데이터',

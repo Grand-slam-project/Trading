@@ -1,3 +1,10 @@
+import {
+  buildJobLogClipboardText,
+  getHealthLabel,
+  getHealthTone,
+  summarizeFailedChecks,
+} from './adminMlDataModel.js'
+
 export function StatusPanel({ result, error, loading }) {
   if (loading) {
     return (
@@ -56,6 +63,163 @@ export function StatusPanel({ result, error, loading }) {
           </div>
         ) : null}
       </dl>
+    </div>
+  )
+}
+
+export function AuditBadge({ status, children }) {
+  return (
+    <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded border px-2 py-1 text-[10px] font-bold ${getHealthTone(status)}`}>
+      {children || getHealthLabel(status)}
+    </span>
+  )
+}
+
+export function GuardSummary({ guardReport, compact = false }) {
+  if (!guardReport) {
+    return <p className="text-[10px] text-slate-500">승격 검증 정보가 아직 없습니다.</p>
+  }
+
+  const failedLines = summarizeFailedChecks(guardReport, compact ? 2 : 5)
+  const tooltipText = failedLines.length ? failedLines.join('\n') : '모든 승격 기준을 통과했습니다.'
+  const failedCount = guardReport.failed_checks?.length ?? 0
+
+  return (
+    <div className="min-w-0 space-y-1 inline-block" title={tooltipText}>
+      <div className="flex min-w-0 items-center gap-1 whitespace-nowrap">
+        <AuditBadge status={guardReport.passed ? 'healthy' : 'warning'}>
+          {guardReport.passed
+            ? '승격 통과'
+            : `차단 (실패 ${failedCount}건)`}
+        </AuditBadge>
+      </div>
+      {!compact && failedLines.length ? (
+        <div className="space-y-1 mt-1">
+          {failedLines.map((line) => (
+            <p key={line} className="break-words text-[10px] leading-4 text-amber-200">
+              {line}
+            </p>
+          ))}
+        </div>
+      ) : !compact ? (
+        <p className="text-[10px] text-emerald-300">모든 승격 기준을 통과했습니다.</p>
+      ) : null}
+    </div>
+  )
+}
+
+export function JobLogModal({ job, onClose }) {
+  if (!job) return null
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(buildJobLogClipboardText(job))
+    alert('로그가 클립보드에 복사되었습니다.')
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div className="relative w-full max-w-4xl max-h-[85vh] flex flex-col rounded-lg border border-slate-700 bg-[#0f172a] text-[#e2e2ec] shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <span className="rounded border border-ai-cyan/40 px-2 py-0.5 text-[10px] font-bold text-ai-cyan">
+              {String(job.type || 'job').toUpperCase()}
+            </span>
+            <span className="text-sm font-bold text-white">
+              {job.label || job.id} 작업 상세 로그
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-400 hover:text-white text-xl font-bold transition-colors"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-4 font-mono text-xs leading-5">
+          {job.config || job.interval ? (
+            <div className="rounded bg-black/30 p-3 border border-slate-800/60 text-slate-400">
+              <p>설정: {job.config || '-'}</p>
+              <p>인터벌: {job.interval || '-'}</p>
+            </div>
+          ) : null}
+
+          {job.training_audit || job.guard_report || job.serving_audit_report ? (
+            <div className="grid gap-4 xl:grid-cols-3">
+              <div className="rounded border border-slate-800 bg-black/30 p-3">
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">학습 감사</p>
+                {job.training_audit?.promotion_guard ? (
+                  <GuardSummary guardReport={job.training_audit.promotion_guard} />
+                ) : (
+                  <p className="text-[10px] text-slate-500">학습 감사 정보가 없습니다.</p>
+                )}
+              </div>
+              <div className="rounded border border-slate-800 bg-black/30 p-3">
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">승격 검증</p>
+                <GuardSummary guardReport={job.guard_report} />
+              </div>
+              <div className="rounded border border-slate-800 bg-black/30 p-3">
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">서빙 감사</p>
+                {job.serving_audit_report ? (
+                  <div className="space-y-2">
+                    <AuditBadge status={job.serving_audit_report.status}>
+                      {job.serving_audit_report.status === 'healthy' ? '전체 정상' : '경고'}
+                    </AuditBadge>
+                    <p className="text-[10px] text-slate-400">차단 항목 {job.serving_audit_report.blocking_count ?? 0}건</p>
+                  </div>
+                ) : job.training_audit?.serving_audit ? (
+                  <div className="space-y-2">
+                    <AuditBadge status={job.training_audit.serving_audit.status}>
+                      {job.training_audit.serving_audit.status === 'healthy' ? '전체 정상' : '경고'}
+                    </AuditBadge>
+                    <p className="text-[10px] text-slate-400">차단 항목 {job.training_audit.serving_audit.blocking_count ?? 0}건</p>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-500">서빙 감사 정보가 없습니다.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="flex flex-col rounded border border-slate-800 bg-black/40">
+              <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5 bg-black/20">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">STDOUT (출력)</span>
+              </div>
+              <pre className="h-[40vh] overflow-auto p-3 whitespace-pre-wrap text-emerald-200 text-[11px] leading-relaxed">
+                {job.stdout || '출력 로그가 없습니다.'}
+              </pre>
+            </div>
+
+            <div className="flex flex-col rounded border border-slate-800 bg-black/40">
+              <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5 bg-black/20">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400">STDERR (에러)</span>
+              </div>
+              <pre className="h-[40vh] overflow-auto p-3 whitespace-pre-wrap text-rose-300 text-[11px] leading-relaxed">
+                {job.stderr || '에러 로그가 없습니다.'}
+              </pre>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-3 border-t border-slate-800 px-5 py-3.5 bg-black/10">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="rounded border border-ai-cyan/40 px-4 py-2 text-xs font-bold text-ai-cyan transition hover:bg-ai-cyan/10"
+          >
+            전체 복사
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-bold text-white transition hover:bg-slate-700"
+          >
+            닫기
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

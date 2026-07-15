@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  buildJobLogClipboardText,
   buildQualityDetail,
   findRegistryRow,
   formatMetric,
@@ -105,4 +106,21 @@ test('관리자 ML 프리셋 파생 목록을 제공한다', () => {
     'us-stock-v1-full',
   ])
   assert.deepEqual(v8TuningPresets.map((preset) => preset.key), ['stock-v8-tune', 'crypto-v8-tune'])
+})
+
+test('작업 상세 로그 복사 텍스트를 안정적으로 만든다', () => {
+  const text = buildJobLogClipboardText({
+    id: 'job-1',
+    label: '주식 학습',
+    stdout: 'ok',
+    stderr: '',
+    training_audit: { passed: true },
+    guard_report: { passed: false },
+  })
+
+  assert.match(text, /=== Job Log: 주식 학습 ===/)
+  assert.match(text, /\[TRAINING AUDIT\]/)
+  assert.match(text, /"passed": true/)
+  assert.match(text, /\[STDOUT\]\nok/)
+  assert.match(text, /\[STDERR\]\nNo stderr/)
 })
