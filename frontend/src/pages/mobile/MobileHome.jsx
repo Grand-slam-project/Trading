@@ -224,7 +224,7 @@ function RankingCard({ row, category, metric, favoriteKeys, onToggleFavorite }) 
   )
 }
 
-export default function MobileHome({ isLoggedIn, userEmail, handleLogout }) {
+export default function MobileHome({ isLoggedIn, handleLogout }) {
   const [activeCategoryKey, setActiveCategoryKey] = useState('domestic')
   const [activeMetricKey, setActiveMetricKey] = useState('tradingValue')
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_RANKING_LIMIT)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   deleteUserWatchlistItem,
@@ -6,6 +6,7 @@ import {
   normalizeWatchlistItem,
   upsertUserWatchlistItem,
 } from '../supabaseClient'
+import { getHomeWatchlistKey } from '../pages/homeModel.js'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050'
 
@@ -25,8 +26,7 @@ function getKoreanMarketState() {
 }
 
 export function getMobileHomeWatchlistKey(row = {}, assetType = 'STOCK') {
-  const item = normalizeWatchlistItem({ ...row, asset_type: assetType })
-  return `${item.asset_type}:${item.exchange}:${item.symbol}`
+  return getHomeWatchlistKey(normalizeWatchlistItem({ ...row, asset_type: assetType }), assetType)
 }
 
 export default function useMobileHomeMarket({ isLoggedIn, activeCategory, activeMetric }) {
@@ -115,12 +115,28 @@ export default function useMobileHomeMarket({ isLoggedIn, activeCategory, active
     }
   }
 
-  useEffect(() => {
+  const loadFavoritesEvent = useEffectEvent(() => {
     loadFavorites()
+  })
+
+  const loadOverviewEvent = useEffectEvent((forceRefresh = false) => (
+    loadOverview(forceRefresh)
+  ))
+
+  useEffect(() => {
+    const timerId = window.setTimeout(() => {
+      loadFavoritesEvent()
+    }, 0)
+
+    return () => window.clearTimeout(timerId)
   }, [isLoggedIn])
 
   useEffect(() => {
-    loadOverview(false)
+    const timerId = window.setTimeout(() => {
+      loadOverviewEvent(false)
+    }, 0)
+
+    return () => window.clearTimeout(timerId)
   }, [activeCategory.key, activeCategory.region, activeMetric.ranking])
 
   return {
