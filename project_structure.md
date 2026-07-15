@@ -223,6 +223,7 @@ frontend/
         ├── adminMlDataPanels.jsx
         ├── adminMlDataResultPanels.jsx
         ├── adminMlDataTrustPanels.jsx
+        ├── adminMlDataWorkflowPanels.jsx
         ├── adminMlDataModel.js
         ├── adminMlDataModel.test.mjs
         ├── AdminSymbolReconciliation.jsx
@@ -322,6 +323,8 @@ frontend/
   - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 모델 결과 카드, 예측 목록, 백테스트 요약 컴포넌트
 - `adminMlDataTrustPanels.jsx`
   - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 운영 신뢰도 검증, TrustMetric, v8 Optuna 튜닝 패널
+- `adminMlDataWorkflowPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 콘솔 헤더, 자동화 실행, 고급 데이터 도구, 모델 결과, 레지스트리 상태, 학습 도구, 작업 이력 패널
 - `adminMlDataModel.js`
   - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 프리셋, 경로/수치 포맷, 승격 검증 요약, 작업 로그 복사 텍스트, 데이터 품질 상세 순수 유틸
 - `adminMlDataModel.test.mjs`
