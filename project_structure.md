@@ -259,7 +259,7 @@ frontend/
   - 메인 대시보드
   - 자산/시장/실거래 vs 모의 토글 흐름
 - `dashboardModel.js`
-  - `Dashboard.jsx`와 `MobileDashboardPage.jsx`가 공유하는 통화 포맷, 자산 평가, 보유자산 병합, 관심종목 판별 순수 유틸
+  - `Dashboard.jsx`와 `MobileDashboardPage.jsx`가 공유하는 통화 포맷, 자산 평가, 보유자산 병합, 보유종목 정렬, 관심종목 판별 순수 유틸
 - `dashboardModel.test.mjs`
   - `dashboardModel.js`의 순수 함수 Node test
 - `AssetDetail.jsx`

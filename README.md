@@ -149,6 +149,7 @@ npm run build
 - 2026-07-15 Settings 1차 리팩토링: 데스크톱/모바일 설정 화면 공통 키 상태 정규화, 닉네임 검증, 거래소별 저장/테스트 payload 생성을 `frontend/src/pages/settingsModel.js`로 분리하고 Node test를 추가했습니다.
 - 2026-07-15 Inquiry 1차 리팩토링: 데스크톱/모바일 문의 화면 공통 문의 라벨, 첨부파일 검증, 목록 정렬·필터·페이지네이션, 등록 폼 검증을 `frontend/src/pages/inquiryModel.js`로 분리하고 Node test를 추가했습니다.
 - 2026-07-15 AssetsTab 1차 리팩토링: 데스크톱/모바일 자산 탭 공통 통화 포맷, 계좌 요약, 보유 종목 표시 행, 정렬, 배분 그래디언트 계산을 `frontend/src/pages/assetsTabModel.js`로 분리하고 Node test를 추가했습니다.
+- 2026-07-15 Dashboard 2차 리팩토링: 데스크톱/모바일 대시보드의 보유종목 정렬을 `sortDashboardHoldings` 공통 모델로 이동하고, 계정/관심종목 로딩 effect 의존성과 set-state 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `79 warnings`입니다.
 
 ## 주요 API
 
