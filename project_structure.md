@@ -231,6 +231,8 @@ frontend/
         ├── News.jsx
         ├── SearchNotFound.jsx
         ├── Settings.jsx
+        ├── settingsModel.js
+        ├── settingsModel.test.mjs
         ├── Signup.jsx
         ├── TradeHistoryTab.jsx
         ├── tradeHistoryModel.js
@@ -283,6 +285,12 @@ frontend/
   - `TradeHistoryTab.jsx`와 `MobileTradeHistoryTab.jsx`가 공유하는 거래 상태 라벨, 금액/수량 포맷, 브로커 원장 연결, 자산이동 행 변환 순수 유틸
 - `tradeHistoryModel.test.mjs`
   - `tradeHistoryModel.js`의 순수 함수 Node test
+- `Settings.jsx`
+  - 프로필 닉네임 저장, 거래소 API Key 등록 현황, 연결 테스트, 저장 검증을 제공하는 데스크톱 설정 화면
+- `settingsModel.js`
+  - `Settings.jsx`와 `MobileSettings.jsx`가 공유하는 키 상태 정규화, 닉네임 검증, 거래소별 저장/테스트 payload 생성 순수 유틸
+- `settingsModel.test.mjs`
+  - `settingsModel.js`의 순수 함수 Node test
 - `supabaseClient.js`, `lib/supabaseClient.js`
   - Supabase 초기화 경로가 2개 존재
   - 향후 통합 시 import 호출부 전수 확인이 필요
