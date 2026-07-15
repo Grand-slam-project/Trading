@@ -15,6 +15,17 @@ export const toNumber = (value) => {
   return Number.isFinite(numericValue) ? numericValue : 0
 }
 
+export const sortDashboardHoldings = (holdingsList, holdingsSort = {}) => {
+  if (!Array.isArray(holdingsList)) return []
+  if (!holdingsSort?.key) return holdingsList
+
+  return [...holdingsList].sort((a, b) => {
+    const aVal = toNumber(a?.[holdingsSort.key])
+    const bVal = toNumber(b?.[holdingsSort.key])
+    return holdingsSort.direction === 'asc' ? aVal - bVal : bVal - aVal
+  })
+}
+
 export const formatKrw = (value) => `₩${Math.round(toNumber(value)).toLocaleString()}`
 
 export const formatCurrency = (value, currency, displayCurrency = 'KRW', exchangeRate = 1500) => {

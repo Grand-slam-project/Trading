@@ -12,6 +12,7 @@ import {
   mergeBalanceWithCompletedTransfers,
   mergeBalanceWithTradeEstimates,
   normalizeDashboardTab,
+  sortDashboardHoldings,
   toKrwAmount,
 } from './dashboardModel.js'
 
@@ -186,5 +187,18 @@ describe('dashboardModel', () => {
       requests.map((request) => `${request.exchange}:${request.env}`),
       ['TOSS:REAL', 'KIS:MOCK', 'BINANCE:REAL', 'BINANCE_UM_FUTURES:REAL'],
     )
+  })
+
+  it('sorts dashboard holdings by numeric fields and preserves order without a key', () => {
+    const holdings = [
+      { symbol: 'A', profit: 1000, profit_rate: 2 },
+      { symbol: 'B', profit: -500, profit_rate: -1 },
+      { symbol: 'C', profit: 2500, profit_rate: 5 },
+    ]
+
+    assert.deepEqual(sortDashboardHoldings(holdings, { key: null }).map((item) => item.symbol), ['A', 'B', 'C'])
+    assert.deepEqual(sortDashboardHoldings(holdings, { key: 'profit', direction: 'desc' }).map((item) => item.symbol), ['C', 'A', 'B'])
+    assert.deepEqual(sortDashboardHoldings(holdings, { key: 'profit_rate', direction: 'asc' }).map((item) => item.symbol), ['B', 'A', 'C'])
+    assert.deepEqual(sortDashboardHoldings(null, { key: 'profit' }), [])
   })
 })

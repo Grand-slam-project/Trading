@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { deleteUserWatchlistItem, fetchUserWatchlist, supabase } from '../supabaseClient'
 import Header from '../components/Header.jsx'
@@ -43,6 +43,7 @@ import {
   mergeBalanceWithTradeEstimates,
   normalizeDashboardTab,
   parsePriceNumber,
+  sortDashboardHoldings,
   toPositiveKrwAmount,
   toNumber,
 } from './dashboardModel.js'
@@ -154,6 +155,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   const [watchlistRefreshCooldown, setWatchlistRefreshCooldown] = useState(0)
   const [removingWatchlistIds, setRemovingWatchlistIds] = useState(new Set())
   const [balanceRefreshCooldown, setBalanceRefreshCooldown] = useState(0)
+  const showMockAssetsRef = useRef(showMockAssets)
 
   const [holdingsSort, setHoldingsSort] = useState({ key: null, direction: 'asc' })
 
@@ -165,15 +167,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
     setHoldingsSort({ key, direction })
   }
 
-  const getSortedHoldings = (holdingsList) => {
-    if (!holdingsList) return []
-    if (!holdingsSort.key) return holdingsList
-    return [...holdingsList].sort((a, b) => {
-      let aVal = toNumber(a[holdingsSort.key])
-      let bVal = toNumber(b[holdingsSort.key])
-      return holdingsSort.direction === 'asc' ? aVal - bVal : bVal - aVal
-    })
-  }
+  const getSortedHoldings = (holdingsList) => sortDashboardHoldings(holdingsList, holdingsSort)
   const [balanceError, setBalanceError] = useState('')
 
   const [displayCurrency, setDisplayCurrency] = useState('KRW')
@@ -181,8 +175,16 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   const [selectedSummaryCurrency, setSelectedSummaryCurrency] = useState(null)
 
   useEffect(() => {
-    const nextTab = normalizeDashboardTab(searchParams.get('tab'))
-    setActiveTab((currentTab) => (currentTab === nextTab ? currentTab : nextTab))
+    showMockAssetsRef.current = showMockAssets
+  }, [showMockAssets])
+
+  useEffect(() => {
+    const timerId = window.setTimeout(() => {
+      const nextTab = normalizeDashboardTab(searchParams.get('tab'))
+      setActiveTab((currentTab) => (currentTab === nextTab ? currentTab : nextTab))
+    }, 0)
+
+    return () => window.clearTimeout(timerId)
   }, [searchParams])
 
   const handleDashboardTabChange = (tabKey) => {
@@ -191,7 +193,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
     setSearchParams(nextTab === DEFAULT_DASHBOARD_TAB ? {} : { tab: nextTab })
   }
 
-  const loadAccountBalance = async () => {
+  const loadAccountBalance = useCallback(async () => {
     if (!isLoggedIn) {
       setBalance(null)
       setBalanceError('')
@@ -209,6 +211,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
         return
       }
 
+      const shouldShowMockAssets = showMockAssetsRef.current
       const authHeader = `Bearer ${session.access_token}`
       const statusResponse = await fetch(`${DASHBOARD_API_BASE_URL}/api/keys/status`, {
         headers: { Authorization: authHeader },
@@ -304,7 +307,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
             'Content-Type': 'application/json',
             Authorization: authHeader,
           },
-          body: JSON.stringify({ show_mock_assets: showMockAssets }),
+          body: JSON.stringify({ show_mock_assets: shouldShowMockAssets }),
         })
         const estimatedPayload = await estimatedResponse.json()
         if (estimatedResponse.ok && estimatedPayload.success) {
@@ -344,9 +347,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
       const mergedBalance = mergeBalanceWithCompletedTransfers(
         deductCoinoneTransfersFromEstimatedHoldings(
           mergeBalanceWithTradeEstimates(
-            mergeAccountBalances(successResults, showMockAssets),
+            mergeAccountBalances(successResults, shouldShowMockAssets),
             tradeRows,
-            showMockAssets,
+            shouldShowMockAssets,
           ),
           transferRows,
         ),
@@ -370,7 +373,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
     } finally {
       setBalanceLoading(false)
     }
-  }
+  }, [isLoggedIn])
 
   const handleBalanceRefresh = () => {
     if (balanceRefreshCooldown > 0 || balanceLoading)
@@ -381,20 +384,18 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   }
 
   useEffect(() => {
-    loadAccountBalance()
-  }, [isLoggedIn])
+    const timerId = window.setTimeout(() => {
+      loadAccountBalance()
+    }, 0)
 
-  const loadDashboardWatchlist = async ({ manual = false } = {}) => {
-    if (manual && watchlistRefreshCooldown > 0) return
+    return () => window.clearTimeout(timerId)
+  }, [loadAccountBalance])
 
+  const loadDashboardWatchlist = useCallback(async () => {
     if (!isLoggedIn) {
       setDashboardWatchlist([])
       setWatchlistError('')
       return
-    }
-
-    if (manual) {
-      setWatchlistRefreshCooldown(60)
     }
 
     setWatchlistLoading(true)
@@ -420,11 +421,22 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
     } finally {
       setWatchlistLoading(false)
     }
+  }, [isLoggedIn])
+
+  const handleDashboardWatchlistRefresh = () => {
+    if (watchlistRefreshCooldown > 0 || watchlistLoading) return
+
+    setWatchlistRefreshCooldown(60)
+    loadDashboardWatchlist()
   }
 
   useEffect(() => {
-    loadDashboardWatchlist()
-  }, [isLoggedIn, activeTab])
+    const timerId = window.setTimeout(() => {
+      loadDashboardWatchlist()
+    }, 0)
+
+    return () => window.clearTimeout(timerId)
+  }, [loadDashboardWatchlist, activeTab])
 
   useEffect(() => {
     if (watchlistRefreshCooldown <= 0) return undefined
@@ -469,7 +481,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
   }, [balanceRefreshCooldown])
 
   useEffect(() => {
-    if (rawBalances.length > 0) {
+    if (rawBalances.length === 0) return undefined
+
+    const timerId = window.setTimeout(() => {
       setBalance(mergeBalanceWithCompletedTransfers(
         deductCoinoneTransfersFromEstimatedHoldings(
           mergeBalanceWithTradeEstimates(
@@ -481,7 +495,9 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
         ),
         completedTransferRows,
       ))
-    }
+    }, 0)
+
+    return () => window.clearTimeout(timerId)
   }, [rawBalances, showMockAssets, executedTradeRows, completedTransferRows])
 
   // 자산 배분 데이터
@@ -804,7 +820,7 @@ export default function Dashboard({ isLoggedIn, userEmail, handleLogout, userPro
                         className="inline-flex items-center gap-1 rounded border border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-400 transition-all hover:border-ai-cyan hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                         type="button"
                         disabled={watchlistLoading || watchlistRefreshCooldown > 0}
-                        onClick={() => loadDashboardWatchlist({ manual: true })}
+                        onClick={handleDashboardWatchlistRefresh}
                       >
                         <RefreshIcon className={`h-3 w-3 ${watchlistLoading ? 'animate-spin' : ''}`} />
                         {watchlistLoading
