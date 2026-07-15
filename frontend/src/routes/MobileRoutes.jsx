@@ -15,6 +15,7 @@ import MobileChatbot from '../pages/mobile/MobileChatbot.jsx'
 import { INQUIRY_ROUTES } from '../dashboardConstants.js'
 import MobileBottomNavigation from '../components/mobile/MobileBottomNavigation.jsx'
 import MobileHeader from '../components/mobile/MobileHeader.jsx'
+import MemberOnlyNotice from '../components/MemberOnlyNotice.jsx'
 
 function AdminProtectedRoute({ isLoggedIn, userProfile, children }) {
   const hasAccess = isLoggedIn && userProfile?.role === 'ADMIN'
@@ -64,6 +65,14 @@ export default function MobileRoutes({
   ) : (
     <Navigate to="/login" replace />
   )
+  const memberOnlyNoticeElement = (
+    <MemberOnlyNotice
+      isLoggedIn={isLoggedIn}
+      userEmail={userEmail}
+      handleLogout={handleLogout}
+      mobileLayout
+    />
+  )
 
   return (
     // 전체 모바일 화면의 바깥 배경
@@ -89,7 +98,7 @@ export default function MobileRoutes({
           />
           <Route
             path="/dashboard"
-            element={(
+            element={isLoggedIn ? (
               <MobileDashboard
                 isLoggedIn={isLoggedIn}
                 userEmail={userEmail}
@@ -97,7 +106,7 @@ export default function MobileRoutes({
                 userProfile={userProfile}
                 setUserProfile={setUserProfile}
               />
-            )}
+            ) : memberOnlyNoticeElement}
           />
           <Route
             path="/market-rankings"
@@ -111,13 +120,13 @@ export default function MobileRoutes({
           />
           <Route
             path="/news"
-            element={(
+            element={isLoggedIn ? (
               <MobileNews
                 isLoggedIn={isLoggedIn}
                 userEmail={userEmail}
                 handleLogout={handleLogout}
               />
-            )}
+            ) : memberOnlyNoticeElement}
           />
           {Object.values(INQUIRY_ROUTES).map((path) => (
             <Route key={path} path={path} element={protectedInquiryElement} />

@@ -1112,6 +1112,85 @@ def _get_stock_trade_status(auth_header: str, symbol: str, broker_env: str) -> d
         }
 
 
+def _is_asset_trade_status_request(text: str) -> bool:
+    value = str(text or "")
+    status_keywords = [
+        "거래 가능",
+        "거래가능",
+        "거래정지",
+        "거래 상태",
+        "거래상태",
+        "특이사항",
+        "유의사항",
+        "투자경고",
+        "정리매매",
+        "매수 가능",
+        "매수가능",
+        "매도 가능",
+        "매도가능",
+    ]
+    return bool(_extract_symbol_query(value)) and any(keyword in value for keyword in status_keywords)
+
+
+def get_asset_trade_status(auth_header: str, message: str) -> dict:
+    symbol_query = _extract_symbol_query(message)
+    if not symbol_query:
+        return {
+            "reply": "거래상태를 확인할 종목명이나 종목코드를 알려주세요.",
+            "data": {"source": "STOCK_TRADE_STATUS", "reason": "missing_symbol"},
+        }
+
+    try:
+        symbol_data = _resolve_symbol(auth_header, symbol_query)
+    except SymbolDisambiguationError as error:
+        return _build_symbol_choice_response(error.query, error.candidates)
+    except ValueError:
+        return {
+            "reply": f"{symbol_query} 종목을 찾지 못했습니다.\n종목명이나 종목코드를 다시 확인해 주세요.",
+            "data": {"source": "STOCK_TRADE_STATUS", "query": symbol_query, "reason": "symbol_not_found"},
+        }
+
+    symbol = str(symbol_data.get("symbol") or symbol_query).upper()
+    display_name = str(symbol_data.get("display_name") or symbol).strip()
+    asset_type = str(symbol_data.get("asset_type") or "STOCK").upper()
+    market = str(symbol_data.get("market") or "").upper()
+    exchange = _default_exchange_for_asset(asset_type, market)
+    label = f"{display_name}({symbol})" if display_name and display_name.upper() != symbol else symbol
+
+    if not _is_stock_asset_for_status(asset_type, exchange):
+        return {
+            "reply": f"{label}은/는 현재 주식 종목 거래상태 조회 대상이 아닙니다.",
+            "data": {
+                "source": "STOCK_TRADE_STATUS",
+                "symbol": symbol,
+                "display_name": display_name,
+                "asset_type": asset_type,
+                "market": market,
+                "reason": "unsupported_asset_type",
+            },
+        }
+
+    broker_env = _detect_env(message) or "REAL"
+    trade_status = _get_stock_trade_status(auth_header, symbol, broker_env)
+    status_text = str(trade_status.get("status_text") or "거래상태: 확인 실패")
+    if trade_status.get("status_lookup_failed"):
+        reply = f"{label}의 거래상태를 확인하지 못했습니다.\nToss API 키, 허용 IP, 계좌 연결 상태를 확인한 뒤 다시 시도해 주세요."
+    else:
+        reply = f"{label}의 {status_text}입니다."
+    return {
+        "reply": reply,
+        "data": {
+            "source": "STOCK_TRADE_STATUS",
+            "symbol": symbol,
+            "display_name": display_name,
+            "asset_type": asset_type,
+            "market": market,
+            "broker_env": broker_env,
+            "trade_status": trade_status,
+        },
+    }
+
+
 def _append_trade_status_to_reply(reply: str, trade_status: dict | None, asset_label: str = "") -> str:
     status_text = _format_stock_trade_status_sentence(asset_label, trade_status) if asset_label else str((trade_status or {}).get("status_text") or "").strip()
     if not status_text:
@@ -2725,12 +2804,13 @@ def get_asset_outlook(auth_header: str, message: str) -> dict:
     asset_type = str(symbol_data.get("asset_type") or "").upper()
     market = str(symbol_data.get("market") or "").strip()
     lookup_label = f"{display_name}({symbol})" if display_name and display_name.upper() != symbol else symbol
-    if _is_general_price_outlook_request(message):
-        return _build_price_based_outlook(auth_header, message, symbol, display_name)
 
     ml_result = build_single_asset_ml_outlook(auth_header, message, symbol_data)
     if ml_result:
         return ml_result
+
+    if _is_general_price_outlook_request(message):
+        return _build_price_based_outlook(auth_header, message, symbol, display_name)
 
     context_parts = [lookup_label, "최근 뉴스 공시 시세 전망 리스크"]
     if asset_type:
@@ -3171,6 +3251,8 @@ def run_chatbot_tool(auth_header: str | None, message: str) -> dict | None:
     is_direct_read_request = any(keyword in text for keyword in ["보여줘", "조회", "알려줘", "뽑아줘", "요약", "뭐뭐 있어", "얼마"])
     if "투자성향" in text and any(keyword in text for keyword in ["재분석", "다시", "변경", "수정"]):
         return get_investment_profile_reanalysis_guide()
+    if _is_asset_trade_status_request(text):
+        return guarded("get_asset_trade_status", get_asset_trade_status)
     if _is_calendar_request(text):
         return guarded("get_market_calendar", get_market_calendar)
     if any(keyword in text for keyword in ["환율", "환전", "달러", "미달러", "엔화", "유로", "위안", "테더", "USDT"]):
