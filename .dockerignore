@@ -3,6 +3,7 @@
 .codex
 .superpowers
 .codegraph
+.omo
 .DS_Store
 .env
 **/.env
@@ -27,6 +28,9 @@
 **/.*_cache.json
 frontend-dashboard-qa.png
 frontend/admin-inquiries-preview.png
+backups
+conflict_report.md
+qa-artifacts
 CORPCODE.xml
 mobile(Copy)
 ml/data/raw
