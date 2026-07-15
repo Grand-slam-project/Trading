@@ -145,6 +145,7 @@ npm run build
 - 2026-07-15 Dashboard 1차 리팩토링: 데스크톱/모바일 대시보드 공통 순수 유틸을 `frontend/src/pages/dashboardModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
 - 2026-07-15 AdminMlData 1차 리팩토링: 데스크톱/모바일 ML 관리자 공통 순수 유틸을 `frontend/src/pages/adminMlDataModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
 - 2026-07-15 TradeHistory 1차 리팩토링: 데스크톱/모바일 거래내역 공통 순수 유틸을 `frontend/src/pages/tradeHistoryModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
+- 2026-07-15 Chatbot Tool Registry 1차 리팩토링: 종목 별칭, 심볼 검색어 추출, 후보 선택 응답 순수 로직을 `backend/services/chatbot/tool_symbol_model.py`로 분리하고 pytest를 추가했습니다.
 
 ## 주요 API
 
