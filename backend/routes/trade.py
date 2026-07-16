@@ -2213,6 +2213,8 @@ def _order_entry_currency(exchange: str, balance: dict | None = None) -> str:
         return "KRW"
     if exchange in {"BINANCE", "BINANCE_UM_FUTURES"}:
         return "USDT"
+    if balance and balance.get("available_cash_currency"):
+        return str(balance.get("available_cash_currency")).upper()
     currency = str((balance or {}).get("currency") or "KRW").upper()
     return currency if currency in {"KRW", "USD"} else "KRW"
 
