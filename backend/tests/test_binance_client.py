@@ -85,7 +85,6 @@ def test_transfer_internal_amount_formatting():
     client = BinanceSpotClient(api_key="dummy_api_key", secret_key="dummy_secret_key")
     client._signed_request = MagicMock(return_value={"tranId": 111})
     
-    # 0.00001 should not be formatted as scientific notation
     client.transfer_internal(type="MAIN_UMFUTURE", amount=0.00001, asset="USDT")
     client._signed_request.assert_called_with(
         "POST",
@@ -93,6 +92,7 @@ def test_transfer_internal_amount_formatting():
         {
             "type": "MAIN_UMFUTURE",
             "asset": "USDT",
-            "amount": "1e-05"  # f"{0.00001:.12g}" produces "1e-05" in python or "0.00001"? Wait, let's check!
+            "amount": "0.00001"
         }
     )
+

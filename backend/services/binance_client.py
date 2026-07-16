@@ -535,7 +535,7 @@ class BinanceSpotClient:
 
     def transfer_internal(self, type: str, amount: float, asset: str = "USDT") -> dict:
         """
-        현물 지갑과 USD-M 선물 지갑 간에 자금을 내부 이체(Universal Transfer)합니다.
+        Transfer funds internally between spot wallet and USD-M futures wallet (Universal Transfer).
         """
         if type not in ("MAIN_UMFUTURE", "UMFUTURE_MAIN"):
             raise ValueError("유효하지 않은 이체 방향입니다. MAIN_UMFUTURE 또는 UMFUTURE_MAIN만 가능합니다.")
@@ -555,7 +555,7 @@ class BinanceSpotClient:
         params = {
             "type": type,
             "asset": normalized_asset,
-            "amount": f"{amount_val:.12g}",
+            "amount": f"{amount_val:.10f}".rstrip('0').rstrip('.'),
         }
 
         response_json = self._signed_request("POST", "/sapi/v1/asset/transfer", params)
