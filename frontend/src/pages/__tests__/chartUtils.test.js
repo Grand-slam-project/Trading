@@ -1,3 +1,4 @@
+/* global process */
 import assert from 'assert';
 import { calculateSMA, getVolumeColor } from '../chartUtils.js';
 

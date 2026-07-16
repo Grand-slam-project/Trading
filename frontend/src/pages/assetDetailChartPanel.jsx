@@ -35,6 +35,8 @@ export default function AssetDetailChartPanel({
   onIntervalChange,
   onToggleExpanded,
   onCloseExpanded,
+  hoverData = null,
+  defaultLegendData = null,
 }) {
   const intervals = assetType === 'STOCK' ? STOCK_INTERVALS : CRYPTO_INTERVALS
 
@@ -85,7 +87,48 @@ export default function AssetDetailChartPanel({
           </div>
         </div>
 
-        <div className={chartPanelClassName}>
+        <div className={`${chartPanelClassName} relative`}>
+          {/* Real-time OHLCV overlay legend */}
+          {!loadingChart && (hoverData || defaultLegendData) && (
+            <div className="absolute top-2 left-3 z-20 flex flex-wrap gap-x-3 gap-y-1 rounded bg-[#0f172a]/75 p-1.5 text-[10px] font-mono text-slate-400 backdrop-blur-sm pointer-events-none border border-[#1e293b]/50">
+              <span className="text-slate-300 font-bold">
+                {hoverData ? '선택' : '최신'}
+              </span>
+              <span>
+                시 <strong className={((hoverData || defaultLegendData).open >= ((hoverData || defaultLegendData).close ?? 0) ? 'text-red-400' : 'text-emerald-400')}>
+                  {Number((hoverData || defaultLegendData).open).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </strong>
+              </span>
+              <span>
+                고 <strong className="text-red-400">
+                  {Number((hoverData || defaultLegendData).high).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </strong>
+              </span>
+              <span>
+                저 <strong className="text-blue-400">
+                  {Number((hoverData || defaultLegendData).low).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </strong>
+              </span>
+              <span>
+                종 <strong className={((hoverData || defaultLegendData).close >= ((hoverData || defaultLegendData).open ?? 0) ? 'text-emerald-400' : 'text-red-400')}>
+                  {Number((hoverData || defaultLegendData).close).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </strong>
+              </span>
+              <span>
+                량 <strong className="text-slate-200">
+                  {Number((hoverData || defaultLegendData).volume).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </strong>
+              </span>
+              {((hoverData || defaultLegendData).changeRate !== undefined) && (
+                <span>
+                  대비 <strong className={(hoverData || defaultLegendData).changeRate >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                    {(hoverData || defaultLegendData).changeRate >= 0 ? '+' : ''}
+                    {Number((hoverData || defaultLegendData).changeRate).toFixed(2)}%
+                  </strong>
+                </span>
+              )}
+            </div>
+          )}
           <div className={`absolute inset-0 flex items-center justify-center bg-[#0e1529]/95 z-10 rounded transition-opacity duration-200 ${loadingChart ? 'opacity-100' : 'opacity-0 pointer-events-none hidden'}`}>
             <span className="text-xs text-cyan-400 font-mono animate-pulse">시세 차트 로드 중...</span>
           </div>
