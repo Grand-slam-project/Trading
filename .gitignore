@@ -42,6 +42,7 @@ ml/models/*
 # SDD (Subagent Driven Development) artifacts
 .superpowers/
 .worktrees/
+backups/
+conflict_report.md
 
 .codegraph
-

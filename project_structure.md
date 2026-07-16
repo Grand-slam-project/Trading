@@ -19,7 +19,6 @@ teamproject/
 ├── backend/
 ├── frontend/
 ├── ml/
-├── scratch/
 └── supabase/
 ```
 
@@ -34,7 +33,11 @@ backend/
 │   ├── home.py
 │   ├── keys.py
 │   ├── ml.py
+│   ├── admin_inquiries.py
+│   ├── admin_symbols.py
 │   ├── admin_users.py
+│   ├── chatbot.py
+│   ├── knowledge.py
 │   ├── news.py
 │   ├── disclosures.py
 │   ├── trade.py
@@ -66,18 +69,26 @@ backend/
 │   │   ├── rag_service.py
 │   │   ├── recommendation_service.py
 │   │   ├── safety_guard.py
+│   │   ├── tool_symbol_model.py
 │   │   ├── tool_registry.py
 │   │   └── web_fallback_search_service.py
 │   ├── coinone_client.py
+│   ├── crypto_cost_basis_service.py
 │   ├── dart_ingest.py
 │   ├── dart_repository.py
+│   ├── disclosure_knowledge_index_service.py
+│   ├── disclosure_knowledge_sync_service.py
+│   ├── embedding_service.py
 │   ├── error_message_service.py
 │   ├── exchange_client.py
 │   ├── home_service.py
 │   ├── keys_service.py
 │   ├── kis_client.py
 │   ├── kis_market_universe.py
+│   ├── knowledge_chunk_service.py
+│   ├── knowledge_repository.py
 │   ├── lock_service.py
+│   ├── market_calendar_scheduler.py
 │   ├── market_repository.py
 │   ├── market_snapshot_scheduler.py
 │   ├── ml_automation_service.py
@@ -91,7 +102,11 @@ backend/
 │   ├── news_repository.py
 │   ├── news_summary_service.py
 │   ├── order_entry_service.py
+│   ├── open_order_status_sync_service.py
+│   ├── obsidian_service.py
+│   ├── rag_retrieval_service.py
 │   ├── supabase_client.py
+│   ├── symbol_reconciliation_service.py
 │   ├── symbol_metadata.py
 │   ├── token_cache_service.py
 │   ├── toss_client.py
@@ -130,6 +145,7 @@ backend/
   - `chatbot/qa_event_repository.py`는 챗봇 QA 분석용 자동 이벤트를 `chatbot_qa_events`에 service role로 저장하며, 민감한 거래소 raw payload 대신 trace·도구·지연시간 요약만 남깁니다.
   - `order_entry_service.py`는 구조화 주문 필수값, 주식·현물·선물 거래 목적, One-way/Hedge 주문 변환, 서비스 레버리지 상한, 주문 해시와 HMAC 사전검증 토큰을 담당합니다.
   - `chatbot/order_form_policy.py`는 일반 채팅의 자연어 주문 의도를 주문 제안 생성 전에 차단하고 상단 `매매 요청` 버튼을 이용하라는 안내만 반환합니다. 종목·수량·가격·거래소를 추출하거나 저장하지 않습니다.
+  - `chatbot/tool_symbol_model.py`는 챗봇 도구가 공유하는 종목 별칭, 심볼 검색어 추출, 종목 후보 정규화, 모호한 종목 선택 응답 생성을 담당합니다.
   - `chatbot/tool_registry.py`는 `get_crypto_market_context`를 통해 코인 현재가, 호가, 캔들, ML 활성 신호, 보유 스냅샷, 스프레드·슬리피지, Coinone/Binance 김치프리미엄과 주의사항을 통합한 읽기 전용 분석 도구를 제공합니다.
   - `obsidian_service.py`는 Markdown frontmatter/title/hash 정규화를 담당
   - `knowledge_chunk_service.py`는 저장된 노트 본문을 RAG/embedding 대상 chunk로 분할
@@ -175,10 +191,16 @@ frontend/
     ├── dashboardUtils.js
     ├── assets/
     ├── components/
+    │   ├── AssetLogo.jsx
+    │   ├── assetLogoModel.js
+    │   ├── assetLogoModel.test.mjs
     │   ├── DashboardComponents.jsx
     │   ├── Header.jsx
     │   ├── InvestmentSurveyModal.jsx
-    │   └── SymbolSearch.jsx
+    │   ├── MemberOnlyModal.jsx
+    │   ├── MemberOnlyNotice.jsx
+    │   ├── SymbolSearch.jsx
+    │   └── mobile/
     ├── lib/
     │   ├── apiError.js
     │   └── supabaseClient.js
@@ -187,23 +209,62 @@ frontend/
     │       ├── ChatbotWidget.jsx
     │       ├── OrderEntryFlow.jsx
     │       ├── chatbotApi.js
+    │       ├── chatbotStream.js
+    │       ├── chatbotTimeline.js
+    │       ├── chatbotTrace.js
     │       └── orderEntryModel.js
     └── pages/
+        ├── AdminInquiries.jsx
         ├── AdminInquiryPanel.jsx
         ├── AdminMlData.jsx
+        ├── adminMlDataCorePanels.jsx
+        ├── adminMlDataHistoryPanels.jsx
+        ├── adminMlDataOperationalPanels.jsx
+        ├── adminMlDataPanels.jsx
+        ├── adminMlDataResultPanels.jsx
+        ├── adminMlDataTrustPanels.jsx
+        ├── adminMlDataWorkflowPanels.jsx
+        ├── adminMlDataModel.js
+        ├── adminMlDataModel.test.mjs
+        ├── AdminSymbolReconciliation.jsx
         ├── AdminUsers.jsx
         ├── AssetDetail.jsx
+        ├── assetDetailAutoRulesPanel.jsx
+        ├── assetDetailChartPanel.jsx
+        ├── assetDetailCommunityPanel.jsx
+        ├── assetDetailHeader.jsx
+        ├── assetDetailMlSignalPanel.jsx
+        ├── assetDetailModel.js
+        ├── assetDetailModel.test.mjs
+        ├── assetDetailNewsDisclosurePanel.jsx
+        ├── assetDetailOrderPanels.jsx
         ├── AssetsTab.jsx
+        ├── assetsTabModel.js
+        ├── assetsTabModel.test.mjs
         ├── Dashboard.jsx
+        ├── dashboardModel.js
+        ├── dashboardModel.test.mjs
         ├── Home.jsx
+        ├── homeModel.js
+        ├── homeModel.test.mjs
+        ├── Inquiry.jsx
+        ├── inquiryModel.js
+        ├── inquiryModel.test.mjs
         ├── Login.jsx
         ├── MarketRankings.jsx
         ├── News.jsx
         ├── SearchNotFound.jsx
         ├── Settings.jsx
+        ├── settingsModel.js
+        ├── settingsModel.test.mjs
         ├── Signup.jsx
         ├── TradeHistoryTab.jsx
-        └── WatchlistTab.jsx
+        ├── tradeHistoryModel.js
+        ├── tradeHistoryModel.test.mjs
+        ├── WatchlistTab.jsx
+        ├── watchlistModel.js
+        ├── watchlistModel.test.mjs
+        └── mobile/
 ```
 
 ### frontend 역할 구분
@@ -218,20 +279,99 @@ frontend/
 - `Dashboard.jsx`
   - 메인 대시보드
   - 자산/시장/실거래 vs 모의 토글 흐름
+- `dashboardModel.js`
+  - `Dashboard.jsx`와 `MobileDashboardPage.jsx`가 공유하는 통화 포맷, 자산 평가, 보유자산 병합, 보유종목 정렬, 관심종목 판별 순수 유틸
+- `dashboardModel.test.mjs`
+  - `dashboardModel.js`의 순수 함수 Node test
 - `AssetDetail.jsx`
   - 종목 상세
   - 차트, 호가, 체결, 주문 사전검증, ML 신호 카드
   - TOSS 주식 상세 헤더의 종목 유의사항 배지 연동
+- `assetDetailAutoRulesPanel.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 조건감시 등록, 수정, 상태 목록 패널
+- `assetDetailCommunityPanel.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 종목 커뮤니티 글 작성, 답글, 삭제·숨김 액션 패널
+- `assetDetailNewsDisclosurePanel.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 뉴스 목록, 뉴스 요약, DART 공시 목록, 공시 AI 분석 콘텐츠 패널
+- `assetDetailMlSignalPanel.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 ML 참고 신호 카드, 모델 품질, 정책 라벨, 신호 해석 표시 패널
+- `assetDetailHeader.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 종목 메타, 즐겨찾기, 종목 유의사항, 현재가 헤더 컴포넌트
+- `assetDetailChartPanel.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 Lightweight Charts 컨테이너, 캔들 주기 선택, 크게보기 패널
+- `assetDetailOrderPanels.jsx`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 보유/주문 가능 요약 카드와 미체결 주문 관리 패널
+- `assetDetailModel.js`
+  - `AssetDetail.jsx`와 `MobileAssetDetail.jsx`가 공유하는 주문 상태 라벨, 조건감시 라벨, 심볼 판별, 가격 자릿수/차트 price format, 뉴스·공시·ML 지표·캔들 포맷, 종목 유의사항 배지 tone 순수 유틸
+- `assetDetailModel.test.mjs`
+  - `assetDetailModel.js`의 순수 함수 Node test
+- `AssetsTab.jsx`
+  - 계좌별 자산 요약, 자산 배분, 보유 종목, 코인 자산 이동/출금 모달을 제공하는 데스크톱 자산 탭
+- `assetsTabModel.js`
+  - `AssetsTab.jsx`와 `MobileAssetsTab.jsx`가 공유하는 통화 포맷, 계좌 요약 카드, 보유 종목 표시 행, 정렬, 배분 그래디언트 순수 유틸
+- `assetsTabModel.test.mjs`
+  - `assetsTabModel.js`의 순수 함수 Node test
+- `WatchlistTab.jsx`
+  - 관심종목 목록, 드래그 순서 변경, 관심종목 차트와 뉴스 요약을 제공하는 데스크톱 탭
+- `watchlistModel.js`
+  - `WatchlistTab.jsx`와 `MobileWatchlistTab.jsx`가 공유하는 시장 필터, 차트 config, 캔들 정규화, 선택 종목 보정 순수 유틸
+- `watchlistModel.test.mjs`
+  - `watchlistModel.js`의 순수 함수 Node test
+- `Home.jsx`
+  - 홈 시장 랭킹, 국내·해외 주식/코인 필터, 관심종목 토글을 제공하는 데스크톱 홈 화면
+- `homeModel.js`
+  - `Home.jsx`와 `useMobileHomeMarket.js`가 공유하는 시장 랭킹 포맷, 국내·해외 판별, 정렬, 관심종목 키 계산 순수 유틸
+- `homeModel.test.mjs`
+  - `homeModel.js`의 순수 함수 Node test
+- `MarketRankings.jsx`
+  - 홈 시장 랭킹 더보기 화면이며 `homeModel.js`의 포맷/관심종목 키 계산을 재사용
 - `AdminInquiryPanel.jsx`
   - 3분리 모델 자동화 상태 모니터링 및 수동 검증 패널
 - `AdminMlData.jsx`
   - ML 운영 콘솔
   - readiness, serving audit, 활성 신호, 자동화 실행, 작업 이력, 고급 도구
   - 관리자 유저 관리 탭에서 `AdminUsers.jsx`를 렌더링
+- `adminMlDataPanels.jsx`
+  - ML 관리자 공통 패널의 배럴 파일
+- `adminMlDataCorePanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 상태 패널, 감사 배지, 승격 검증 요약, 작업 로그 모달, 버전 차이 요약 컴포넌트
+- `adminMlDataHistoryPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 작업 이력 패널
+  - 데스크톱 테이블과 모바일 카드 레이아웃을 variant로 유지
+- `adminMlDataOperationalPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 활성 신호, 운영 모델 감사, 모델 교체 판단, 모델 레지스트리, 준비 상태, 실행 체크리스트, 실험 리포트, 버전 비교 컴포넌트
+- `adminMlDataResultPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 모델 결과 카드, 예측 목록, 백테스트 요약 컴포넌트
+- `adminMlDataTrustPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 운영 신뢰도 검증, TrustMetric, v8 Optuna 튜닝 패널
+- `adminMlDataWorkflowPanels.jsx`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 콘솔 헤더, 자동화 실행, 고급 데이터 도구, 모델 결과, 레지스트리 상태, 학습 도구, 작업 이력 패널
+- `adminMlDataModel.js`
+  - `AdminMlData.jsx`와 `MobileAdminMlData.jsx`가 공유하는 ML 프리셋, 경로/수치 포맷, 승격 검증 요약, 작업 로그 복사 텍스트, 데이터 품질 상세 순수 유틸
+- `adminMlDataModel.test.mjs`
+  - `adminMlDataModel.js`의 순수 함수 Node test
 - `AdminUsers.jsx`
   - 관리자 유저 관리 탭의 데스크톱/반응형 UI
   - UTC 기준 실제 챗봇 토큰 사용량 집계와 사용자별 사용 내역을 조회
   - 현재 기본 모델 `gpt-4.1-mini` 가격 기준으로 통산/30일/유저별/요청별 예상 비용을 추정 표시
+- `TradeHistoryTab.jsx`
+  - 거래 제안, 브로커 원장, 자산이동 내역을 통합 표시하는 데스크톱 거래내역 탭
+- `tradeHistoryModel.js`
+  - `TradeHistoryTab.jsx`와 `MobileTradeHistoryTab.jsx`가 공유하는 거래 상태 라벨, 금액/수량 포맷, 브로커 원장 연결, 자산이동 행 변환 순수 유틸
+- `tradeHistoryModel.test.mjs`
+  - `tradeHistoryModel.js`의 순수 함수 Node test
+- `Settings.jsx`
+  - 프로필 닉네임 저장, 거래소 API Key 등록 현황, 연결 테스트, 저장 검증을 제공하는 데스크톱 설정 화면
+- `settingsModel.js`
+  - `Settings.jsx`와 `MobileSettings.jsx`가 공유하는 키 상태 정규화, 닉네임 검증, 거래소별 저장/테스트 payload 생성 순수 유틸
+- `settingsModel.test.mjs`
+  - `settingsModel.js`의 순수 함수 Node test
+- `Inquiry.jsx`
+  - 고객센터, FAQ, 1:1 문의 등록, 문의 내역 조회/삭제를 제공하는 데스크톱 문의 화면
+- `inquiryModel.js`
+  - `Inquiry.jsx`와 `MobileInquiry.jsx`가 공유하는 문의 라벨, 첨부파일 검증, 저장 경로 생성, 목록 정렬·필터·페이지네이션, 요약/폼 검증 순수 유틸
+- `inquiryModel.test.mjs`
+  - `inquiryModel.js`의 순수 함수 Node test
 - `supabaseClient.js`, `lib/supabaseClient.js`
   - Supabase 초기화 경로가 2개 존재
   - 향후 통합 시 import 호출부 전수 확인이 필요
@@ -309,10 +449,6 @@ supabase/
 ```
 
 이 디렉토리는 존재합니다. 다만 현재 애플리케이션 동작의 일부는 파일 기반 이력과 Supabase best-effort 동기화가 섞여 있으므로, "모든 운영 상태가 Supabase 마이그레이션만으로 완전히 재현된다"고 적으면 사실과 다릅니다.
-
-## scratch
-
-`scratch/`는 운영 코드가 아니라 로컬 확인용 스크립트와 임시 테스트 파일 보관 영역입니다. 문서나 리뷰에서 제품 기능처럼 설명하지 않는 것이 맞습니다.
 
 ## 문서 업데이트 원칙
 

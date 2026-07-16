@@ -30,6 +30,10 @@ rsync -av --progress -e "ssh ${SSH_OPTS[*]}" \
   --exclude '.DS_Store' \
   --exclude '.agents' \
   --exclude '.codex' \
+  --exclude '.omo' \
+  --exclude 'backups' \
+  --exclude 'conflict_report.md' \
+  --exclude 'qa-artifacts' \
   --exclude '.kis_token_cache.json' \
   --exclude '.toss_token_cache.json' \
   --exclude '.*_cache.json' \
