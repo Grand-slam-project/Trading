@@ -244,6 +244,7 @@ def run_test_suite(report_path: str = "docs/superpowers/specs/2026-07-16-chatbot
             # 각 시나리오별로 순차 실행
             for sc in scenarios:
                 captured_dict = {name: [] for name in tool_names}
+                exception_msg = None
                 
                 # 패치 적용
                 for name in tool_names:
@@ -264,7 +265,7 @@ def run_test_suite(report_path: str = "docs/superpowers/specs/2026-07-16-chatbot
                     )
                 except Exception as e:
                     # 에러 발생 시 세부 내역에 기록
-                    pass
+                    exception_msg = str(e)
                 finally:
                     # 패치 원복
                     for name, original in original_funcs.items():
@@ -282,6 +283,8 @@ def run_test_suite(report_path: str = "docs/superpowers/specs/2026-07-16-chatbot
                 
                 eval_res = evaluate_scenario(captured, sc["expected"])
                 details = f"Expected: {sc['expected']['tool_name']}({sc['expected']['arguments']}), Captured: {captured.get('tool_name')}({captured.get('arguments')})"
+                if exception_msg:
+                    details += f", Exception: {exception_msg}"
                 results.append({
                     "scenario_id": sc["scenario_id"],
                     "input": sc["input"],
