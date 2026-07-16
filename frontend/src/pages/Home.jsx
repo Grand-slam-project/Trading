@@ -1,9 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 import Header from "../components/Header.jsx";
 import AssetLogo from "../components/AssetLogo.jsx";
-import { deleteUserWatchlistItem, fetchUserWatchlist, normalizeWatchlistItem, upsertUserWatchlistItem } from "../supabaseClient";
+import { deleteUserWatchlistItem, fetchUserWatchlist, upsertUserWatchlistItem } from "../supabaseClient";
+import {
+  applyClientMarketFilters,
+  changeClass,
+  formatChange,
+  formatHomeMarketPrice,
+  formatHomeMarketValue,
+  getHomeWatchlistKey,
+} from "./homeModel.js";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5050";
 
@@ -33,116 +41,6 @@ function formatSnapshotTime(value) {
     minute: "2-digit",
     second: "2-digit",
   });
-}
-
-function changeClass(value) {
-  if (String(value).startsWith("+")) return "text-red-400";
-  if (String(value).startsWith("-")) return "text-sky-400";
-  return "text-slate-400";
-}
-
-function formatNumber(value, decimals = 0) {
-  const numberValue = Number(value);
-  if (!Number.isFinite(numberValue)) return "-";
-  return numberValue.toLocaleString("ko-KR", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-}
-
-function isForeignRow(row = {}) {
-  const marketText = String(
-    row.market_segment
-      ?? row.market_country
-      ?? row.region
-      ?? row.country
-      ?? "",
-  ).toUpperCase();
-  const assetType = String(row.asset_type ?? row.assetType ?? "").toUpperCase();
-  const symbol = String(row.symbol ?? row.code ?? row.ticker ?? "").toUpperCase();
-  const explicitForeign = ["US", "USA", "NASDAQ", "NYSE", "AMEX", "해외"].some((token) => marketText.includes(token));
-  return explicitForeign || (assetType === "STOCK" && /^[A-Z.\-]+$/.test(symbol));
-}
-
-function formatPrice(row) {
-  if (typeof row.price === "string" && row.price) {
-    if (row.price === "-") return "-";
-    if (isForeignRow(row)) return row.price.startsWith("$") ? row.price : `$${row.price}`;
-    return row.price.endsWith("원") ? row.price : `${row.price}원`;
-  }
-  const price = row.price ?? row.current_price ?? row.live_price;
-  if (price === undefined || price === null || price === "") return "-";
-  if (isForeignRow(row)) return `$${formatNumber(price, Number(price) % 1 === 0 ? 0 : 1)}`;
-  return `${formatNumber(price, Number(price) % 1 === 0 ? 0 : 1)}원`;
-}
-
-function formatChange(row) {
-  // 서버 응답이 새/구 필드를 섞어서 내려줘도 같은 화면 포맷으로 보이게 맞춘다.
-  // 숫자 표기 방식이 달라도 사용자는 한 가지 스타일로만 보게 하는 게 목적이다.
-  if (typeof row.change === "string" && row.change) return row.change;
-  const change = Number(row.change_rate ?? row.changeRate ?? row.change_percent ?? row.changePercent ?? row.live_change_rate);
-  if (!Number.isFinite(change)) return "-";
-  return `${change > 0 ? "+" : ""}${change.toFixed(2)}%`;
-}
-
-function formatValue(row, valueKey, ranking) {
-  if (isForeignRow(row) && valueKey !== "volume" && ["상승률", "하락률"].includes(ranking)) return "-";
-  const direct = valueKey === "volume"
-    ? row.trading_volume ?? row.volume
-    : row.trading_value ?? row.value;
-  if (typeof direct === "string" && direct) return direct;
-  const numeric = Number(direct);
-  if (!Number.isFinite(numeric) || numeric <= 0) return "-";
-  if (valueKey === "volume") return Math.round(numeric).toLocaleString("ko-KR");
-  if (numeric >= 100_000_000_0000) return `${(numeric / 100_000_000_0000).toFixed(1)}조원`;
-  if (numeric >= 100_000_000) return `${Math.round(numeric / 100_000_000).toLocaleString("ko-KR")}억원`;
-  return `${Math.round(numeric).toLocaleString("ko-KR")}원`;
-}
-
-function numericChange(row) {
-  // 정렬용 값도 표시용 값과 같은 우선순위를 따라가야 사용자 눈에 일관된다.
-  // 화면에는 같은 종목이 같은 기준으로 정렬되어 보여야 혼란이 없다.
-  const raw = row.change_rate ?? row.changeRate ?? row.change_percent ?? row.changePercent ?? row.live_change_rate ?? row.change;
-  const value = Number(String(raw ?? "").replace("%", "").replace("+", ""));
-  return Number.isFinite(value) ? value : 0;
-}
-
-function numericMetric(row, metric) {
-  const raw = metric === "거래량" ? row.trading_volume ?? row.volume : row.trading_value ?? row.value;
-  const text = String(raw ?? "").replace(/,/g, "").trim();
-  const numberPart = Number(text.replace(/[^0-9.-]/g, ""));
-  if (!Number.isFinite(numberPart)) return 0;
-  if (text.includes("조")) return numberPart * 1_000_000_000_000;
-  if (text.includes("억")) return numberPart * 100_000_000;
-  if (text.includes("만")) return numberPart * 10_000;
-  const value = Number(text.replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(value) ? value : 0;
-}
-
-function getWatchlistKey(row = {}, assetType = "STOCK") {
-  const item = normalizeWatchlistItem({ ...row, asset_type: assetType });
-  return `${item.asset_type}:${item.exchange}:${item.symbol}`;
-}
-
-function matchesRegion(row, region) {
-  if (!region) return true;
-  const isForeign = isForeignRow(row);
-  return region === "해외" ? isForeign : !isForeign;
-}
-
-function applyClientMarketFilters(rows, activeFilters) {
-  const filtered = [...rows].filter((row) => matchesRegion(row, activeFilters.region));
-  const ranking = activeFilters.ranking || activeFilters.metric || "거래대금";
-
-  if (ranking === "상승률") {
-    filtered.sort((a, b) => numericChange(b) - numericChange(a));
-  } else if (ranking === "하락률") {
-    filtered.sort((a, b) => numericChange(a) - numericChange(b));
-  } else {
-    filtered.sort((a, b) => numericMetric(b, ranking) - numericMetric(a, ranking));
-  }
-
-  return filtered.map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
 function FilterChip({ label, active = false, onClick }) {
@@ -202,7 +100,7 @@ function MarketTable({ rows, titleType = "stock", ranking = "거래대금", favo
           const symbol = row.code || row.symbol;
           const assetType = isStock ? "STOCK" : "CRYPTO";
           const assetPath = `/asset/${assetType}/${symbol}`;
-          const isFavorite = favoriteKeys.has(getWatchlistKey(row, assetType));
+          const isFavorite = favoriteKeys.has(getHomeWatchlistKey(row, assetType));
           return (
             <Link
               key={`${row.rank}-${row.name}`}
@@ -230,11 +128,11 @@ function MarketTable({ rows, titleType = "stock", ranking = "거래대금", favo
                   <div className="mt-0.5 truncate text-[12px] text-slate-500">{row.code || row.symbol}</div>
                 </div>
               </div>
-              <div className="text-right text-[15px] tabular-nums text-slate-100">{formatPrice(row)}</div>
+              <div className="text-right text-[15px] tabular-nums text-slate-100">{formatHomeMarketPrice(row)}</div>
               <div className={`text-right text-[15px] font-medium tabular-nums ${changeClass(formatChange(row))}`}>
                 {formatChange(row)}
               </div>
-              <div className="text-right text-[15px] tabular-nums text-slate-200">{formatValue(row, valueKey, ranking)}</div>
+              <div className="text-right text-[15px] tabular-nums text-slate-200">{formatHomeMarketValue(row, valueKey, ranking)}</div>
             </Link>
           );
         })}
@@ -260,7 +158,7 @@ function MobileMarketTable({ rows, titleType = "stock", ranking = "거래대금"
         const symbol = row.code || row.symbol;
         const assetType = titleType === "stock" ? "STOCK" : "CRYPTO";
         const assetPath = `/asset/${assetType}/${symbol}`;
-        const isFavorite = favoriteKeys.has(getWatchlistKey(row, assetType));
+        const isFavorite = favoriteKeys.has(getHomeWatchlistKey(row, assetType));
         return (
           <Link
             key={`${titleType}-${row.rank}-${row.name}`}
@@ -291,7 +189,7 @@ function MobileMarketTable({ rows, titleType = "stock", ranking = "거래대금"
             <div className="mt-3 grid grid-cols-3 gap-2 text-right text-[13px]">
               <div>
                 <div className="text-[10px] text-slate-500">현재가</div>
-                <div className="mt-1 text-slate-100">{formatPrice(row)}</div>
+                <div className="mt-1 text-slate-100">{formatHomeMarketPrice(row)}</div>
               </div>
               <div>
                 <div className="text-[10px] text-slate-500">등락률</div>
@@ -299,7 +197,7 @@ function MobileMarketTable({ rows, titleType = "stock", ranking = "거래대금"
               </div>
               <div>
                 <div className="text-[10px] text-slate-500">{valueLabel}</div>
-                <div className="mt-1 text-slate-200">{formatValue(row, valueKey, ranking)}</div>
+                <div className="mt-1 text-slate-200">{formatHomeMarketValue(row, valueKey, ranking)}</div>
               </div>
             </div>
           </Link>
@@ -329,11 +227,11 @@ export default function Home({ isLoggedIn, userEmail, handleLogout }) {
   });
   const stocks = useMemo(
     () => applyClientMarketFilters(stockCandidates, stockFilters).slice(0, 10),
-    [stockCandidates, stockFilters.region, stockFilters.ranking],
+    [stockCandidates, stockFilters],
   );
   const filteredCoins = useMemo(
     () => applyClientMarketFilters(coins, coinFilters).slice(0, 10),
-    [coins, coinFilters.ranking],
+    [coins, coinFilters],
   );
   const stockRankingOptions = stockFilters.region === "해외"
     ? filters.ranking.filter((label) => label !== "거래대금")
@@ -349,7 +247,7 @@ export default function Home({ isLoggedIn, userEmail, handleLogout }) {
 
     try {
       const items = await fetchUserWatchlist();
-      setFavoriteKeys(new Set(items.map((item) => getWatchlistKey(item, item.assetType))));
+      setFavoriteKeys(new Set(items.map((item) => getHomeWatchlistKey(item, item.assetType))));
     } catch (error) {
       console.warn('Failed to load watchlist.', error);
       setFavoriteKeys(new Set());
@@ -363,7 +261,7 @@ export default function Home({ isLoggedIn, userEmail, handleLogout }) {
       return;
     }
 
-    const key = getWatchlistKey(row, assetType);
+    const key = getHomeWatchlistKey(row, assetType);
     const nextKeys = new Set(favoriteKeys);
     const isFavorite = nextKeys.has(key);
 
@@ -434,8 +332,20 @@ export default function Home({ isLoggedIn, userEmail, handleLogout }) {
       ? "시장 데이터를 불러오는 중입니다."
       : `시장 데이터 정상 표시 중${snapshotTimeText}${checkedTimeText}`);
 
-  useEffect(() => {
+  const loadFavoritesEvent = useEffectEvent(() => {
     loadFavorites();
+  });
+
+  const loadOverviewEvent = useEffectEvent((requestFilters, requestCoinFilters) => (
+    loadOverview(requestFilters, requestCoinFilters)
+  ));
+
+  useEffect(() => {
+    const timerId = window.setTimeout(() => {
+      loadFavoritesEvent();
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
   }, [isLoggedIn]);
 
   useEffect(() => {
@@ -456,17 +366,20 @@ export default function Home({ isLoggedIn, userEmail, handleLogout }) {
       const delay = currentMarketState.isOpen ? 60_000 : 600_000;
       timeoutId = window.setTimeout(async () => {
         if (cancelled) return;
-        await loadOverview(requestFilters, requestCoinFilters);
+        await loadOverviewEvent(requestFilters, requestCoinFilters);
         if (!cancelled) scheduleNextLoad();
       }, delay);
     };
 
-    loadOverview(requestFilters, requestCoinFilters).then(() => {
-      if (!cancelled) scheduleNextLoad();
-    });
+    const initialLoadTimerId = window.setTimeout(() => {
+      loadOverviewEvent(requestFilters, requestCoinFilters).then(() => {
+        if (!cancelled) scheduleNextLoad();
+      });
+    }, 0);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(initialLoadTimerId);
       window.clearTimeout(timeoutId);
     };
   }, [stockFilters.region, stockFilters.ranking, stockFilters.horizon, coinFilters.ranking]);

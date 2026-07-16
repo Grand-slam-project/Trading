@@ -1,17 +1,10 @@
-import React, { useState, useEffect } from 'react'
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabaseClient'
 
 export default function Login() {
   const navigate = useNavigate()
   
-  // 로그인 폼 입력값
-  const [loginInputs, setLoginInputs] = useState({
-    email: '',
-    password: '',
-    rememberMe: false
-  })
-
   // 세션 감지하여 이미 로그인되어 있으면 대시보드로 리다이렉트
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -20,14 +13,6 @@ export default function Login() {
       }
     })
   }, [navigate])
-
-  const handleLoginInputChange = (e) => {
-    const { name, value, type, checked } = e.target
-    setLoginInputs(prev => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value
-    }))
-  }
 
   // 카카오 로그인 수행 (Supabase Auth OAuth 연동)
   const handleKakaoLogin = async () => {

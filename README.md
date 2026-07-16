@@ -15,6 +15,7 @@
   - `home`, `keys`, `ml`, `news`, `trade`, `transfer` Blueprint API
   - `chatbot` Blueprint API: Supabase Auth 검증, 로그인 사용자별 대화 이력 복원·저장, 도구 호출 및 LLM 응답
   - 챗봇 매매 제안은 `trade_proposals.status=PENDING`으로만 생성되며, 승인 카드에서만 주문 승인/거절 가능
+  - 일반 채팅의 자연어 주문 요청은 직접 제안을 만들지 않고 `매매 요청 열기` 액션으로 구조화 주문 폼을 열며, 사용자가 폼에서 계좌·종목·수량·가격을 재확인한 뒤에만 제안 생성 가능
   - 환경 미지정 챗봇 주문 제안은 MOCK이 기본이며 REAL은 사용자가 명시한 경우에만 허용됩니다.
   - 사전검증 실패, API 키 미등록, 지원하지 않는 주문유형, 실거래 10만 원 초과 요청은 PENDING 제안을 생성하지 않습니다.
   - 승인 요청은 Supabase RPC로 원자 선점되어 같은 `proposal_id`가 중복 주문으로 전송되지 않습니다.
@@ -129,6 +130,58 @@ python3 -m ml.src.export_serving_package \
 ```
 
 생성된 패키지는 `manifest.json`에 모델 파일, risk 모델, config, feature 순서, 정책, 성능 요약, 파일 해시를 포함합니다.
+
+### 4. 테스트와 검증
+
+```bash
+python3 -m pytest -q
+npm run lint
+npm run build
+```
+
+루트 `pytest`는 `pytest.ini` 기준으로 `backend/tests`, `tests/backend`를 수집합니다. `ml/test_yf.py`는 야후파이낸스 수동 확인 스크립트 성격이므로 기본 테스트 수집 대상에서 제외합니다.
+
+- 2026-07-15 AssetDetail 1차 리팩토링: 공통 순수 유틸을 `frontend/src/pages/assetDetailModel.js`로 분리하고 명확한 dead code warning을 제거했습니다. 전체 lint 상태는 `0 errors`, `109 warnings`입니다.
+- 2026-07-15 Dashboard 1차 리팩토링: 데스크톱/모바일 대시보드 공통 순수 유틸을 `frontend/src/pages/dashboardModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
+- 2026-07-15 AdminMlData 1차 리팩토링: 데스크톱/모바일 ML 관리자 공통 순수 유틸을 `frontend/src/pages/adminMlDataModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
+- 2026-07-15 TradeHistory 1차 리팩토링: 데스크톱/모바일 거래내역 공통 순수 유틸을 `frontend/src/pages/tradeHistoryModel.js`로 분리하고 Node test를 추가했습니다. 전체 lint 상태는 `0 errors`, `97 warnings`입니다.
+- 2026-07-15 Chatbot Tool Registry 1차 리팩토링: 종목 별칭, 심볼 검색어 추출, 후보 선택 응답 순수 로직을 `backend/services/chatbot/tool_symbol_model.py`로 분리하고 pytest를 추가했습니다.
+- 2026-07-15 Settings 1차 리팩토링: 데스크톱/모바일 설정 화면 공통 키 상태 정규화, 닉네임 검증, 거래소별 저장/테스트 payload 생성을 `frontend/src/pages/settingsModel.js`로 분리하고 Node test를 추가했습니다.
+- 2026-07-15 Inquiry 1차 리팩토링: 데스크톱/모바일 문의 화면 공통 문의 라벨, 첨부파일 검증, 목록 정렬·필터·페이지네이션, 등록 폼 검증을 `frontend/src/pages/inquiryModel.js`로 분리하고 Node test를 추가했습니다.
+- 2026-07-15 AssetsTab 1차 리팩토링: 데스크톱/모바일 자산 탭 공통 통화 포맷, 계좌 요약, 보유 종목 표시 행, 정렬, 배분 그래디언트 계산을 `frontend/src/pages/assetsTabModel.js`로 분리하고 Node test를 추가했습니다.
+- 2026-07-15 Dashboard 2차 리팩토링: 데스크톱/모바일 대시보드의 보유종목 정렬을 `sortDashboardHoldings` 공통 모델로 이동하고, 계정/관심종목 로딩 effect 의존성과 set-state 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `79 warnings`입니다.
+- 2026-07-15 AssetDetail 2차 리팩토링: 데스크톱/모바일 종목 상세의 가격 자릿수와 차트 price format 계산을 `assetDetailModel.js`로 이동하고, 데이터 로딩/차트 effect 의존성 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `59 warnings`이며, `AssetDetail.jsx`와 `MobileAssetDetail.jsx`는 후속 섹션 컴포넌트 분리가 필요합니다.
+- 2026-07-15 Watchlist 1차 리팩토링: 데스크톱/모바일 관심종목 탭의 시장 필터, 차트 config, 캔들 정규화, 선택 종목 보정 로직을 `frontend/src/pages/watchlistModel.js`로 분리하고 effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `47 warnings`입니다.
+- 2026-07-15 Home 1차 리팩토링: 홈 시장 랭킹의 가격/등락률/거래대금 포맷, 국내·해외 판별, 랭킹 정렬, 관심종목 키 계산을 `frontend/src/pages/homeModel.js`로 분리하고 홈 로딩 effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `35 warnings`입니다.
+- 2026-07-15 MarketRankings 1차 리팩토링: 데스크톱/모바일 시장 랭킹 화면의 가격/등락률/거래대금 포맷과 관심종목 키 계산을 `homeModel.js` 재사용으로 통합하고 favorites effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `29 warnings`입니다.
+- 2026-07-15 Auth 화면 1차 정리: 데스크톱/모바일 로그인 화면의 미사용 이메일 로그인 상태와 핸들러, 회원가입 화면의 미사용 Supabase 응답 변수를 제거했습니다. 전체 lint 상태는 `0 errors`, `19 warnings`입니다.
+- 2026-07-15 AdminUsers 1차 정리: 관리자 유저 목록 조회의 확정 검색어 상태를 분리하고 목록/상세/거래내역 로더를 안정화해 effect 의존성 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `16 warnings`입니다.
+- 2026-07-15 AdminInquiries 1차 정리: 데스크톱/모바일 문의 관리자 답변 모달 초기값을 key 기반 재마운트로 처리하고 초기 목록 fetch effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `12 warnings`입니다.
+- 2026-07-15 AdminSymbolReconciliation 1차 정리: 종목 정리 관리자 화면의 인증 헤더와 최신 스캔 로더를 안정화하고 초기 로딩 effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `10 warnings`입니다.
+- 2026-07-15 AssetLogo 1차 정리: 공통 자산 로고 URL 생성 로직을 `frontend/src/components/assetLogoModel.js`로 분리하고 컴포넌트 effect 경고와 Fast Refresh export 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `8 warnings`입니다.
+- 2026-07-15 공통 effect 1차 정리: 디바이스 감지 훅, 대시보드 사이드바 권한 표시, 데스크톱/모바일 뉴스 초기 로딩 effect 경고를 정리했습니다. 전체 lint 상태는 `0 errors`, `4 warnings`입니다.
+- 2026-07-15 Settings/TradeHistory 의존성 정리: 데스크톱/모바일 설정 화면의 키 상태 로더와 거래내역 주문 상태 동기화 함수를 안정화해 남은 effect 의존성 경고를 모두 정리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`입니다.
+- 2026-07-15 AssetDetail 3차 리팩토링: 데스크톱/모바일 종목 상세의 뉴스·공시·ML 지표·캔들 포맷 순수 유틸을 `assetDetailModel.js`로 이동하고 Node test를 보강했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 4,824줄, `MobileAssetDetail.jsx`는 4,812줄입니다.
+- 2026-07-15 AdminMlData 2차 리팩토링: 데스크톱/모바일 ML 관리자 화면의 공통 수집 상태 패널을 `frontend/src/pages/adminMlDataPanels.jsx`로 분리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,963줄, `MobileAdminMlData.jsx`는 2,924줄입니다.
+- 2026-07-15 AdminMlData 3차 리팩토링: ML 관리자 작업 로그 모달, 승격 검증 요약, 감사 배지를 `adminMlDataPanels.jsx`로 공통화하고 로그 복사 문자열 생성을 `adminMlDataModel.js`로 분리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,803줄, `MobileAdminMlData.jsx`는 2,764줄입니다.
+- 2026-07-15 AdminMlData 4차 리팩토링: 데스크톱/모바일 ML 관리자 버전 차이 요약 패널을 `adminMlDataPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,745줄, `MobileAdminMlData.jsx`는 2,706줄입니다.
+- 2026-07-15 AdminMlData 5차 리팩토링: 데스크톱/모바일 ML 관리자 활성 신호 패널을 `adminMlDataPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,544줄, `MobileAdminMlData.jsx`는 2,505줄입니다.
+- 2026-07-15 AdminMlData 6차 리팩토링: 데스크톱/모바일 ML 관리자 운영 모델 감사 패널을 `adminMlDataPanels.jsx`로 공통화하고 모바일 검증 카드 배치를 prop으로 유지했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,463줄, `MobileAdminMlData.jsx`는 2,425줄입니다.
+- 2026-07-15 AdminMlData 7차 리팩토링: 데스크톱/모바일 ML 관리자 모델 교체 판단 패널을 `adminMlDataPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,371줄, `MobileAdminMlData.jsx`는 2,333줄입니다.
+- 2026-07-15 AdminMlData 8차 리팩토링: 데스크톱/모바일 ML 관리자 모델 레지스트리 패널을 `adminMlDataPanels.jsx`로 공통화하고 테이블/카드 레이아웃은 variant로 유지했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,267줄, `MobileAdminMlData.jsx`는 2,237줄입니다.
+- 2026-07-15 AdminMlData 9차 리팩토링: 데스크톱/모바일 ML 관리자 준비 상태, 실행 체크리스트, 실험 리포트 패널을 `adminMlDataPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 2,084줄, `MobileAdminMlData.jsx`는 2,055줄입니다. 공통 패널 파일은 1,059줄로 커져 후속 분리 대상입니다.
+- 2026-07-15 AdminMlData 10차 리팩토링: 과밀해진 `adminMlDataPanels.jsx`를 배럴 파일로 축소하고 핵심 공통 패널은 `adminMlDataCorePanels.jsx`, 운영/레지스트리/리포트 패널은 `adminMlDataOperationalPanels.jsx`로 분리했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 새 패널 파일은 각각 283줄, 779줄입니다.
+- 2026-07-15 AdminMlData 11차 리팩토링: 데스크톱/모바일 ML 관리자 버전 비교 표를 `adminMlDataOperationalPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 1,989줄, `MobileAdminMlData.jsx`는 1,960줄입니다.
+- 2026-07-15 AdminMlData 12차 리팩토링: 데스크톱/모바일 ML 관리자 작업 이력 패널을 `adminMlDataHistoryPanels.jsx`로 분리하고 테이블/카드 레이아웃은 variant로 유지했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 1,876줄, `MobileAdminMlData.jsx`는 1,860줄입니다.
+- 2026-07-15 AdminMlData 13차 리팩토링: 데스크톱/모바일 ML 관리자 모델 결과 카드를 `adminMlDataResultPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 1,586줄, `MobileAdminMlData.jsx`는 1,570줄입니다.
+- 2026-07-15 AdminMlData 14차 리팩토링: 데스크톱/모바일 ML 관리자 운영 신뢰도 검증과 v8 Optuna 튜닝 패널을 `adminMlDataTrustPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 1,382줄, `MobileAdminMlData.jsx`는 1,367줄입니다.
+- 2026-07-15 AdminMlData 15차 리팩토링: 데스크톱/모바일 ML 관리자 콘솔 헤더, 자동화 실행, 고급 데이터 도구, 모델 결과, 레지스트리 상태, 학습 도구, 작업 이력 영역을 `adminMlDataWorkflowPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AdminMlData.jsx`는 993줄, `MobileAdminMlData.jsx`는 978줄입니다.
+- 2026-07-15 AssetDetail 1차 리팩토링: 데스크톱/모바일 종목 상세의 상단 메타 헤더와 차트 패널을 `assetDetailHeader.jsx`, `assetDetailChartPanel.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 4,683줄, `MobileAssetDetail.jsx`는 4,671줄입니다.
+- 2026-07-15 AssetDetail 2차 리팩토링: 데스크톱/모바일 종목 상세의 보유/주문 가능 요약 카드와 미체결 주문 관리 패널을 `assetDetailOrderPanels.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 4,530줄, `MobileAssetDetail.jsx`는 4,520줄입니다.
+- 2026-07-15 AssetDetail 3차 리팩토링: 데스크톱/모바일 종목 상세의 조건감시 등록·수정·상태 패널을 `assetDetailAutoRulesPanel.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 4,214줄, `MobileAssetDetail.jsx`는 4,205줄입니다.
+- 2026-07-15 AssetDetail 4차 리팩토링: 데스크톱/모바일 종목 상세의 뉴스·공시 탭 콘텐츠를 `assetDetailNewsDisclosurePanel.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 3,928줄, `MobileAssetDetail.jsx`는 3,920줄입니다.
+- 2026-07-15 AssetDetail 5차 리팩토링: 데스크톱/모바일 종목 상세의 커뮤니티 글·답글 패널을 `assetDetailCommunityPanel.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 3,741줄, `MobileAssetDetail.jsx`는 3,733줄입니다.
+- 2026-07-15 AssetDetail 6차 리팩토링: 데스크톱/모바일 종목 상세의 ML 참고 신호 카드와 해석 로직을 `assetDetailMlSignalPanel.jsx`로 공통화했습니다. 전체 lint 상태는 `0 errors`, `0 warnings`이며 `AssetDetail.jsx`는 3,505줄, `MobileAssetDetail.jsx`는 3,497줄입니다.
 
 ## 주요 API
 

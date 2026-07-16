@@ -56,14 +56,7 @@ export async function fetchNewsArticles({ market = 'ALL', category = 'ALL', quer
 
   const data = await response.json()
   const contentRange = response.headers.get('content-range')
-  let count = 0
-
-  if (contentRange) {
-    const [, total] = contentRange.split('/')
-    count = Number(total) || data.length
-  } else {
-    count = data.length
-  }
+  const count = contentRange ? Number(contentRange.split('/')[1]) || data.length : data.length
 
   return {
     items: Array.isArray(data) ? data : [],
@@ -91,4 +84,3 @@ export async function ensureNewsSummaries({ articleIds = [] }) {
   const payload = await response.json()
   return payload?.data || { items: [], generatedCount: 0 }
 }
-

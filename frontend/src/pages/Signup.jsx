@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabaseClient'
 
@@ -47,7 +47,7 @@ export default function Signup() {
     setLoading(true)
     try {
       // Supabase Auth SignUp 호출 (메타데이터에 nickname과 phone 포함)
-      const { data, error } = await supabase.auth.signUp({
+      const { error } = await supabase.auth.signUp({
         email: inputs.email,
         password: inputs.password,
         options: {
