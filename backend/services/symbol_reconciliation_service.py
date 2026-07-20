@@ -148,10 +148,10 @@ def _build_canonical_lookup(rows: list[dict[str, Any]]) -> set[str]:
     return {normalize_symbol(row.get("symbol")) for row in rows if row.get("symbol")}
 
 
-def _classify_row(row: dict[str, Any], all_symbols: set[str]) -> dict[str, Any]:
+def _classify_row(row: dict[str, Any], all_symbols: set[str], used_symbols_set: set[str]) -> dict[str, Any]:
     symbol = normalize_symbol(row.get("symbol"))
     source_table = row.get("source_table") or "kis_stock_master"
-    reference_count = count_symbol_references(symbol)
+    reference_count = 1 if symbol in used_symbols_set else 0
     is_temporary = is_temporary_symbol(symbol)
     canonical = canonical_symbol_for(symbol)
     canonical_exists = canonical != symbol and canonical in all_symbols
@@ -214,7 +214,20 @@ def run_symbol_reconciliation(actor_id: str, market_country: str = "ALL", limit:
     normalized_country = str(market_country or "ALL").upper()
     rows = _merge_source_rows(max(1, min(int(limit or 1000), 5000)), normalized_country)
     all_symbols = _build_canonical_lookup(rows)
-    items = [_classify_row(row, all_symbols) for row in rows]
+
+    # 5개 참조 테이블 전체에서 단 5번의 쿼리로 사용 중인 모든 심볼들을 긁어옵니다.
+    used_symbols_set = set()
+    for table, column in REFERENCE_TABLES:
+        try:
+            records = safe_query_supabase_as_service_role(table, "GET", params={"select": column}) or []
+            for r in records:
+                val = normalize_symbol(r.get(column))
+                if val:
+                    used_symbols_set.add(val)
+        except Exception:
+            pass
+
+    items = [_classify_row(row, all_symbols, used_symbols_set) for row in rows]
     summary = _summarize_items(items)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
