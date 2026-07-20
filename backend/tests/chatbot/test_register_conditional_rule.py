@@ -68,6 +68,14 @@ def test_register_conditional_rule_success():
         assert rule["execution_mode"] == "PROPOSAL"  # "자동" 키워드가 없으므로 기본값 PROPOSAL
         assert rule["status"] == "RUNNING"
 
+        # 실제 safe_query_supabase 호출 시 json_data 인자로 전달되었는지 엄격히 확인
+        mock_supabase.assert_called_once_with(
+            auth_header,
+            "auto_trading_rules",
+            "POST",
+            json_data=rule,
+        )
+
 
 def test_register_conditional_rule_auto_mode():
     from backend.services.chatbot.tool_registry import register_conditional_rule

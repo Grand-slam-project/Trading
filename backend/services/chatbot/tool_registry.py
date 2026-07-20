@@ -3900,7 +3900,7 @@ def register_conditional_rule(
             auth_header,
             "auto_trading_rules",
             "POST",
-            body=row,
+            json_data=row,
         )
     except Exception as error:
         logger.exception("Failed to insert auto trading rule: %s", str(error))
