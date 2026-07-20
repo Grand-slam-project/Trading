@@ -179,7 +179,7 @@ def test_query_supabase_merges_optional_response_headers(monkeypatch):
         def json():
             return []
 
-    def fake_patch(url, headers, json, params):
+    def fake_patch(url, headers, json, params, **kwargs):
         captured.update({
             "url": url,
             "headers": headers,
