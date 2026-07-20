@@ -197,6 +197,19 @@ class ChatbotService:
         self.memory_service = ChatbotMemoryService(self.knowledge_repository)
         self.conversation_repository = ChatbotConversationRepository()
 
+        # LangGraph Agent 초기화
+        from backend.services.chatbot.llm_provider import create_chatbot_llm, get_chatbot_config
+        from backend.services.chatbot.agent import create_chatbot_agent
+
+        self._chatbot_config = get_chatbot_config()
+        try:
+            self._llm = create_chatbot_llm()
+            self.agent = create_chatbot_agent(self._llm)
+        except Exception as error:
+            logger.warning("LangGraph Agent 초기화 실패. 레거시 LLM 클라이언트를 사용합니다. error=%s", str(error))
+            self._llm = None
+            self.agent = None
+
     @staticmethod
     def _log_repository_failure(message: str) -> None:
         if has_app_context():
@@ -709,6 +722,55 @@ class ChatbotService:
         synthesized_reply = str((synthesis or {}).get("reply") or "").strip()
         return synthesized_reply or str(tool_result.get("reply") or "")
 
+    def _run_agent(
+        self,
+        text: str,
+        user_id: str | None,
+        auth_header: str | None,
+        user_timezone: str | None = None,
+        trace_callback: TraceCallback | None = None,
+        delta_callback: Callable[[str], None] | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        """Run LangGraph agent for the given user message."""
+        from backend.services.chatbot.agent import run_agent, stream_agent
+
+        self._emit_trace(trace_callback, "history", "대화 이력 확인")
+        history = self._load_recent_history(auth_header, user_id)
+
+        self._emit_trace(trace_callback, "llm", "LLM 답변 준비")
+        system_prompt = self._build_prompt_for_user(
+            auth_header, user_id, text, user_timezone, trace_callback,
+        )
+
+        agent_kwargs = {
+            "system_prompt": system_prompt,
+            "user_message": text,
+            "history": history,
+            "user_id": user_id or "",
+            "auth_header": auth_header or "",
+            "request_id": request_id or "",
+        }
+
+        if delta_callback:
+            self._emit_trace(trace_callback, "agent", "Agent 스트리밍 실행")
+            result = stream_agent(
+                self.agent,
+                **agent_kwargs,
+                on_delta=delta_callback,
+                on_trace=lambda step: self._emit_trace(
+                    trace_callback, step.get("kind", "tool"), step.get("label", "도구 처리")
+                ),
+            )
+        else:
+            self._emit_trace(trace_callback, "agent", "Agent 실행")
+            result = run_agent(self.agent, **agent_kwargs)
+
+        reply_text = result.get("reply") or ""
+        self._record_exchange(auth_header, user_id, text, reply_text)
+
+        return result
+
     def reply(
         self,
         message: str,
@@ -883,6 +945,12 @@ class ChatbotService:
                             "source": "PROJECT_TOOL_PENDING",
                         },
                 }
+
+        if self.agent is not None:
+            return self._run_agent(
+                text, user_id, auth_header, user_timezone,
+                trace_callback, delta_callback, request_id,
+            )
 
         user_lookup_context = UserLookupContext(
             auth_header=auth_header,
