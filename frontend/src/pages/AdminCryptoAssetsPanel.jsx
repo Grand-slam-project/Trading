@@ -47,6 +47,7 @@ export default function AdminCryptoAssetsPanel({ authHeaders }) {
   const [cryptoError, setCryptoError] = useState('')
   const [cryptoQuery, setCryptoQuery] = useState('')
   const [editingCrypto, setEditingCrypto] = useState(null)
+  const [visibleCount, setVisibleCount] = useState(10)
 
   const loadCryptoAssets = useCallback(async () => {
     setCryptoLoading(true)
@@ -63,6 +64,7 @@ export default function AdminCryptoAssetsPanel({ authHeaders }) {
         throw new Error(buildApiErrorText(payload, '코인 종목 마스터를 불러오지 못했습니다.'))
       }
       setCryptoItems(payload.data?.items || [])
+      setVisibleCount(10)
     } catch (requestError) {
       setCryptoError(requestError.message || '코인 종목 마스터를 불러오지 못했습니다.')
     } finally {
@@ -170,7 +172,7 @@ export default function AdminCryptoAssetsPanel({ authHeaders }) {
             </tr>
           </thead>
           <tbody>
-            {cryptoItems.map((item) => (
+            {cryptoItems.slice(0, visibleCount).map((item) => (
               <tr key={item.base_symbol} className="border-t border-slate-800/80 text-slate-300">
                 <td className="px-3 py-3 font-mono font-bold text-white">{item.base_symbol}</td>
                 <td className="px-3 py-3">
@@ -201,6 +203,14 @@ export default function AdminCryptoAssetsPanel({ authHeaders }) {
         {!cryptoLoading && cryptoItems.length === 0 ? <p className="px-4 py-8 text-center text-sm text-slate-500">표시할 코인 종목이 없습니다.</p> : null}
         {cryptoLoading ? <p className="px-4 py-8 text-center text-sm text-slate-500">코인 종목을 불러오는 중입니다...</p> : null}
       </div>
+
+      {visibleCount < cryptoItems.length && (
+        <div className="mt-4 flex justify-center">
+          <button type="button" onClick={() => setVisibleCount((prev) => prev + 10)} className="rounded border border-slate-700 bg-slate-800/40 px-6 py-2.5 text-xs font-bold text-slate-300 transition hover:border-ai-cyan hover:text-white active:scale-95">
+            더보기 ({visibleCount} / {cryptoItems.length})
+          </button>
+        </div>
+      )}
 
       <AdminCryptoAssetEditModal editingCrypto={editingCrypto} setEditingCrypto={setEditingCrypto} saveCryptoAsset={saveCryptoAsset} cryptoActionLoading={cryptoActionLoading} />
     </div>
