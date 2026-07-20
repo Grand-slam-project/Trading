@@ -338,4 +338,49 @@ FUNCTION_SCHEMAS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "register_conditional_rule",
+        "description": "주식 혹은 코인에 대해 익절(target_profit_rate) 또는 손절(stop_loss_rate) 비율 기준의 조건감시 자동매도(혹은 제안) 규칙을 등록합니다.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "조건을 걸 주식명, 코인명 또는 심볼. 예: 삼성전자, BTC, 리플"
+                },
+                "exchange": {
+                    "type": "string",
+                    "enum": ["TOSS", "KIS", "COINONE", "BINANCE"],
+                    "description": "거래소 이름. 지정하지 않으면 가상자산은 COINONE, 주식은 TOSS를 기본값으로 지정합니다."
+                },
+                "broker_env": {
+                    "type": "string",
+                    "enum": ["REAL", "MOCK"],
+                    "description": "계좌 환경. REAL(실전계좌) 또는 MOCK(모의계좌). 지정하지 않으면 사용자의 기본 설정을 따릅니다."
+                },
+                "target_profit_rate": {
+                    "type": "number",
+                    "description": "익절 목표 수익률 백분율(%). 예: 3.0 (수익률 3% 의미). 입력하지 않거나 0이면 익절 조건을 설정하지 않습니다."
+                },
+                "stop_loss_rate": {
+                    "type": "number",
+                    "description": "손절 한도 손실률 백분율(%). 예: 2.0 (손실률 -2% 의미). 입력하지 않거나 0이면 손절 조건을 설정하지 않습니다."
+                },
+                "investment_amount": {
+                    "type": "number",
+                    "description": "감시에 할당할 총 원화 투자 금액. 예: 100000 (10만원). 기본값은 100,000원입니다."
+                },
+                "quantity": {
+                    "type": "number",
+                    "description": "조건 도달 시 매도할 수량. 지정하지 않으면 투자금액/진입가로 자동 계산합니다."
+                },
+                "execution_mode": {
+                    "type": "string",
+                    "enum": ["PROPOSAL", "AUTO"],
+                    "description": "실행 모드. PROPOSAL(조건 도달 시 매도 제안서만 발행), AUTO(즉시 자동매도 주문 실행). 지정하지 않으면 기본값은 PROPOSAL(안전지향)입니다."
+                }
+            },
+            "required": ["query"]
+        }
+    }
 ]

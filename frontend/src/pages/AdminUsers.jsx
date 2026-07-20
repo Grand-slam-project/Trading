@@ -5,12 +5,12 @@ import { buildApiErrorText } from '../lib/apiError.js'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050'
 const USER_PAGE_SIZE = 100
-const GPT_4_1_MINI_PRICING = {
-  model: 'gpt-4.1-mini',
-  inputPerMillionUsd: 0.4,
-  outputPerMillionUsd: 1.6,
-  blendedPerMillionUsd: 0.42,
+const MODEL_PRICING = {
+  'gemini-3.5-pro': { inputPerMillionUsd: 1.25, outputPerMillionUsd: 5.00, blendedPerMillionUsd: 2.1875 },
+  'gemini-3.5-flash': { inputPerMillionUsd: 0.075, outputPerMillionUsd: 0.30, blendedPerMillionUsd: 0.13125 },
+  'gpt-4.1-mini': { inputPerMillionUsd: 0.15, outputPerMillionUsd: 0.60, blendedPerMillionUsd: 0.2625 },
 }
+const DEFAULT_PRICING = { inputPerMillionUsd: 0.15, outputPerMillionUsd: 0.60, blendedPerMillionUsd: 0.2625 }
 
 const numberFormatter = new Intl.NumberFormat('ko-KR')
 const usdFormatter = new Intl.NumberFormat('en-US', {
@@ -38,14 +38,18 @@ function formatUsd(value) {
   return usdFormatter.format(numericValue)
 }
 
-function estimateCurrentModelCost({ promptTokens = 0, completionTokens = 0 } = {}) {
-  const promptCost = (Number(promptTokens || 0) / 1_000_000) * GPT_4_1_MINI_PRICING.inputPerMillionUsd
-  const completionCost = (Number(completionTokens || 0) / 1_000_000) * GPT_4_1_MINI_PRICING.outputPerMillionUsd
+function estimateCurrentModelCost({ promptTokens = 0, completionTokens = 0 } = {}, modelName = '') {
+  const model = String(modelName || '').trim().toLowerCase()
+  const pricing = MODEL_PRICING[model] || DEFAULT_PRICING
+  const promptCost = (Number(promptTokens || 0) / 1_000_000) * pricing.inputPerMillionUsd
+  const completionCost = (Number(completionTokens || 0) / 1_000_000) * pricing.outputPerMillionUsd
   return promptCost + completionCost
 }
 
-function estimateBlendedCurrentModelCost(totalTokens = 0) {
-  return (Number(totalTokens || 0) / 1_000_000) * GPT_4_1_MINI_PRICING.blendedPerMillionUsd
+function estimateBlendedCurrentModelCost(totalTokens = 0, modelName = '') {
+  const model = String(modelName || '').trim().toLowerCase()
+  const pricing = MODEL_PRICING[model] || DEFAULT_PRICING
+  return (Number(totalTokens || 0) / 1_000_000) * pricing.blendedPerMillionUsd
 }
 
 function sumDailyCost(dailyRows = []) {
@@ -431,7 +435,7 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
             <SummaryCard
               label="30일 예상 비용"
               value={formatUsd(estimateBlendedCurrentModelCost(summary.tokens30d))}
-              detail={`${GPT_4_1_MINI_PRICING.model} blended 추정`}
+              detail="Blended 기준 추정"
             />
             <SummaryCard
               label="통산 예상 비용"
@@ -446,9 +450,10 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
           <div className="overflow-hidden rounded-lg border border-slate-700/80 bg-slate-surface p-3 sm:p-4">
             <div className="md:overflow-x-auto">
               <div className="md:min-w-[760px]">
-                <div className="hidden grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_105px_120px] rounded-t-lg bg-[#0f172a] text-xs font-bold text-slate-400 md:grid">
+                <div className="hidden grid-cols-[minmax(170px,1.2fr)_80px_100px_repeat(4,minmax(90px,1fr))_105px_120px] rounded-t-lg bg-[#0f172a] text-xs font-bold text-slate-400 md:grid">
                   <div className="px-3 py-3">유저</div>
                   <div className="px-3 py-3">권한</div>
+                  <div className="px-3 py-3">최근 모델</div>
                   <div className="px-3 py-3 text-right">오늘</div>
                   <div className="px-3 py-3 text-right">7일</div>
                   <div className="px-3 py-3 text-right">30일</div>
@@ -468,13 +473,16 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                       key={item.id}
                       type="button"
                       onClick={() => handleOpenUserModal(item)}
-                      className={`grid w-full grid-cols-2 gap-2 border-t border-slate-800 px-4 py-4 text-left text-sm first:border-t-0 hover:bg-white/[0.03] md:grid-cols-[minmax(170px,1.2fr)_90px_repeat(4,minmax(95px,1fr))_105px_120px] md:gap-0 md:px-0 md:py-0 ${selectedUser?.id === item.id ? 'bg-ai-cyan/5' : ''}`}
+                      className={`grid w-full grid-cols-2 gap-2 border-t border-slate-800 px-4 py-4 text-left text-sm first:border-t-0 hover:bg-white/[0.03] md:grid-cols-[minmax(170px,1.2fr)_80px_100px_repeat(4,minmax(90px,1fr))_105px_120px] md:gap-0 md:px-0 md:py-0 ${selectedUser?.id === item.id ? 'bg-ai-cyan/5' : ''}`}
                     >
                       <span className="min-w-0 md:px-3 md:py-3">
                         <span className="block truncate font-bold text-white">{item.email || item.nickname || '-'}</span>
                         <span className="block truncate text-xs text-slate-500">{item.nickname || item.id}</span>
                       </span>
                       <span className="text-xs font-bold text-ai-cyan md:px-3 md:py-3">{item.role}</span>
+                      <span className="text-xs text-slate-400 truncate md:px-3 md:py-3" title={item.usage?.recentModel || '-'}>
+                        {item.usage?.recentModel || '-'}
+                      </span>
                       <span className="flex items-center justify-between gap-2 font-mono text-xs text-slate-300 md:block md:px-3 md:py-3 md:text-right">
                         <span className="font-inter font-bold text-slate-500 md:hidden">오늘</span>
                         <span>{formatNumber(item.usage?.todayTokens)}</span>
@@ -493,7 +501,7 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                       </span>
                       <span className="flex items-center justify-between gap-2 font-mono text-xs text-emerald-300 md:block md:px-3 md:py-3 md:text-right">
                         <span className="font-inter font-bold text-slate-500 md:hidden">예상 비용</span>
-                        <span>{formatUsd(estimateBlendedCurrentModelCost(item.usage?.tokens30d))}</span>
+                        <span>{formatUsd(estimateBlendedCurrentModelCost(item.usage?.tokens30d, item.usage?.recentModel))}</span>
                       </span>
                       <span className="col-span-2 text-xs text-slate-500 md:col-span-1 md:px-3 md:py-3">{formatDateTime(item.usage?.recentUsedAt)}</span>
                     </button>
@@ -582,13 +590,13 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                   ) : detailError ? (
                     <div className="py-10 text-center text-sm font-bold text-rose-400">{detailError}</div>
                   ) : detail ? (
-                    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+                    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
                       <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <p className="text-xs font-bold text-slate-400">일별 실제 토큰</p>
                             <p className="mt-1 text-[11px] text-slate-500">
-                              {GPT_4_1_MINI_PRICING.model} 기준 입력/출력 분리 계산
+                              일별 실제 입력/출력 분리 계산
                             </p>
                           </div>
                           <div className="text-right">
@@ -620,6 +628,27 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                         </div>
                       </div>
                       <div className="grid gap-4">
+                        {/* 모델별 호출 통계 카드 추가 */}
+                        <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
+                          <p className="text-xs font-bold text-slate-400">모델별 호출 통계</p>
+                          <div className="mt-2 grid gap-2">
+                            {Object.entries(detail.byModel || {}).map(([modelName, value]) => (
+                              <div key={modelName} className="grid grid-cols-[1fr_auto] gap-2 text-xs">
+                                <span className="truncate text-slate-400 font-bold" title={modelName}>{modelName}</span>
+                                <span className="font-mono text-white text-right">
+                                  {formatNumber(value.requestCount)}회 · {formatNumber(value.totalTokens)}T ({formatUsd(estimateCurrentModelCost({
+                                    promptTokens: value.promptTokens,
+                                    completionTokens: value.completionTokens,
+                                  }, modelName))})
+                                </span>
+                              </div>
+                            ))}
+                            {Object.keys(detail.byModel || {}).length === 0 ? (
+                              <p className="text-[11px] text-slate-500">모델 호출 이력이 없습니다.</p>
+                            ) : null}
+                          </div>
+                        </div>
+
                         <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
                           <p className="text-xs font-bold text-slate-400">요청 유형별 합계</p>
                           <div className="mt-2 grid gap-2">
@@ -627,29 +656,33 @@ export default function AdminUsers({ isLoggedIn, userEmail, handleLogout, hideHe
                               <div key={type} className="flex items-center justify-between gap-3 text-xs">
                                 <span className="truncate text-slate-400">{type}</span>
                                 <span className="font-mono text-white">
-                                  {formatNumber(value.totalTokens)} · {formatUsd(estimateCurrentModelCost({
-                                    promptTokens: value.promptTokens,
-                                    completionTokens: value.completionTokens,
-                                  }))}
+                                  {formatNumber(value.requestCount)}회 · {formatNumber(value.totalTokens)}T
                                 </span>
                               </div>
                             ))}
                           </div>
                         </div>
+
                         <div className="rounded-lg border border-slate-800 bg-[#0f172a] p-4">
                           <p className="text-xs font-bold text-slate-400">최근 요청 로그</p>
                           <div className="mt-2 grid gap-2">
-                            {(detail.recentLogs || []).slice(0, 8).map((log) => (
-                              <div key={`${log.createdAt}-${log.requestType}-${log.totalTokens}`} className="grid grid-cols-[1fr_auto] gap-3 text-xs">
-                                <span className="min-w-0 truncate text-slate-400">{formatDateTime(log.createdAt)} · {log.requestType}</span>
-                                <span className="font-mono text-white">
-                                  {formatNumber(log.totalTokens)} · {formatUsd(estimateCurrentModelCost({
-                                    promptTokens: log.promptTokens,
-                                    completionTokens: log.completionTokens,
-                                  }))}
-                                </span>
-                              </div>
-                            ))}
+                            {(detail.recentLogs || []).slice(0, 8).map((log) => {
+                              const uniqueKey = `${log.createdAt}-${log.requestType}-${log.totalTokens}-${log.model || ''}`;
+                              return (
+                                <div key={uniqueKey} className="grid grid-cols-[1fr_auto] gap-3 text-xs">
+                                  <span className="min-w-0 truncate text-slate-400">
+                                    <span className="block truncate">{formatDateTime(log.createdAt)} · {log.requestType}</span>
+                                    <span className="block truncate text-[10px] text-slate-500 font-semibold">{log.model || 'unknown'}</span>
+                                  </span>
+                                  <span className="font-mono text-white self-center">
+                                    {formatNumber(log.totalTokens)} · {formatUsd(estimateCurrentModelCost({
+                                      promptTokens: log.promptTokens,
+                                      completionTokens: log.completionTokens,
+                                    }, log.model))}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
                       </div>

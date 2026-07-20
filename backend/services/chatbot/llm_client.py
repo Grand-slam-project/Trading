@@ -99,6 +99,7 @@ class ChatbotLLMClient:
         usage: dict | None,
         request_type: str,
         request_id: str | None = None,
+        model: str | None = None,
     ) -> None:
         normalized = self._normalize_usage(usage)
         authenticated_user_id = str(user_id or "").strip()
@@ -116,7 +117,7 @@ class ChatbotLLMClient:
         payload = {
             "user_id": authenticated_user_id,
             "request_type": normalized_request_type,
-            "model": self.model,
+            "model": model or self.model,
             **normalized,
         }
         if normalized_request_id:

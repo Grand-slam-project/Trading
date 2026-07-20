@@ -881,6 +881,11 @@ def test_binance_spot_symbol_info_returns_exchange_base_asset(monkeypatch):
         "market_max_qty": 50.0,
         "market_step_size": 0.002,
         "tick_size": 0.0,
+        "min_price": 0.0,
+        "max_price": 0.0,
+        "min_notional": 0.0,
+        "ask_multiplier_up": 0.0,
+        "bid_multiplier_down": 0.0,
     }
 
 

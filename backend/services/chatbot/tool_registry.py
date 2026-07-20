@@ -315,25 +315,19 @@ def _is_calendar_request(text: str) -> bool:
 
 def _get_user_toss_calendar_client(auth_header: str, broker_env: str = "REAL") -> TossClient:
     user_id, _ = get_user_id_from_header(auth_header)
-    params = {
-        "user_id": f"eq.{user_id}",
-        "exchange": "eq.TOSS",
-        "broker_env": f"eq.{broker_env}",
-        "select": "encrypted_access_key,encrypted_secret_key,toss_account_seq",
-        "limit": "1",
-    }
-    records = safe_query_supabase(auth_header, "user_api_keys", "GET", params=params) or []
-    if records:
-        encryption_key = os.getenv("ENCRYPTION_KEY", "default-dev-encryption-key-32bytes!")
-        crypto = CryptoHelper(encryption_key)
-        record = records[0]
+    try:
+        from backend.services.credentials_gateway import CredentialsGateway
+        gateway = CredentialsGateway()
+        creds = gateway.get_credentials(auth_header, user_id, "TOSS", broker_env)
         return TossClient(
-            client_id=crypto.decrypt(record.get("encrypted_access_key")),
-            client_secret=crypto.decrypt(record.get("encrypted_secret_key")),
-            account_seq=record.get("toss_account_seq"),
+            client_id=creds["access_key"],
+            client_secret=creds["secret_key"],
+            account_seq=creds["toss_account_seq"],
             env=broker_env,
             user_id=user_id,
         )
+    except Exception:
+        pass
 
     client_id = os.getenv("SHARED_TOSS_CLIENT_ID") or os.getenv("TOSS_CLIENT_ID") or os.getenv("TOSS_API_KEY")
     client_secret = os.getenv("SHARED_TOSS_CLIENT_SECRET") or os.getenv("TOSS_CLIENT_SECRET") or os.getenv("TOSS_SECRET_KEY")
@@ -3806,3 +3800,171 @@ def _detect_currency_pair(text: str) -> tuple[str, str]:
     if non_krw:
         return non_krw[0], "KRW"
     return "USD", "KRW"
+
+
+def register_conditional_rule(
+    auth_header: str,
+    message: str,
+    query: str,
+    exchange: str = None,
+    broker_env: str = None,
+    target_profit_rate: float = None,
+    stop_loss_rate: float = None,
+    investment_amount: float = None,
+    quantity: float = None,
+    execution_mode: str = None,
+    **kwargs,
+) -> dict:
+    """주식 혹은 코인에 대해 익절 또는 손절 조건감시 자동매도 규칙을 등록합니다.
+
+    진입가(entry_price)를 알기 위해 현재 실시간 시세를 자동으로 조회하여 대입합니다.
+    """
+    symbol_data = _resolve_symbol(auth_header, query)
+    symbol = str(symbol_data.get("symbol") or query).upper()
+    ticker = str(symbol_data.get("ticker") or symbol).upper()
+    asset_type = str(symbol_data.get("asset_type") or "STOCK").upper()
+    market = str(symbol_data.get("market") or "").upper()
+    display_name = str(symbol_data.get("name") or symbol)
+
+    # 거래소 결정
+    if not exchange:
+        exchange = _default_exchange_for_asset(asset_type, market, symbol)
+    exchange = exchange.upper()
+
+    # 계좌 환경 결정 (TOSS, COINONE은 모의계좌가 없음)
+    if not _exchange_has_mock_env(exchange):
+        broker_env = "REAL"
+    else:
+        if not broker_env:
+            broker_env = _detect_env(message) or "MOCK"
+    broker_env = broker_env.upper()
+
+    # 실행 모드 결정 (기본값 PROPOSAL - 안전지향)
+    if not execution_mode:
+        execution_mode = "AUTO" if any(keyword in message for keyword in ["자동", "자동매매"]) else "PROPOSAL"
+    execution_mode = execution_mode.upper()
+
+    # 현재가 조회 (진입 평단가로 설정)
+    price_res = get_asset_price(auth_header, message, query=query, exchange=exchange, broker_env=broker_env)
+    price_data = price_res.get("data") or {}
+    entry_price = _to_float(price_data.get("current_price") or price_data.get("price"))
+
+    if entry_price <= 0:
+        return {
+            "reply": f"'{display_name}'의 현재 시세를 조회할 수 없어 조건감시를 등록하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+            "data": {"error": "price_lookup_failed"},
+        }
+
+    # 투자 금액 및 수량 계산
+    qty = _to_float(quantity)
+    amount = _to_float(investment_amount)
+
+    if qty <= 0 and amount <= 0:
+        # 사용자가 둘 다 지정하지 않았다면 계좌 보유 잔고 전량 조회
+        portfolio = get_portfolio_summary(auth_header, message, exchange=exchange, broker_env=broker_env)
+        summaries = (portfolio.get("data") or {}).get("summaries") or []
+        
+        holding_qty = 0.0
+        for item in summaries:
+            if item.get("exchange") == exchange and item.get("env") == broker_env:
+                for h in item.get("holdings") or []:
+                    h_symbol = str(h.get("symbol") or h.get("currency") or "").upper()
+                    if h_symbol == symbol or h_symbol == ticker:
+                        holding_qty = _to_float(h.get("qty") or h.get("quantity") or h.get("balance") or h.get("available_qty"))
+                        break
+        
+        if holding_qty > 0:
+            qty = holding_qty
+            amount = qty * entry_price
+        else:
+            return {
+                "reply": f"현재 {exchange} {broker_env} 계좌에 '{display_name}' 보유 잔고가 없어 조건감시를 등록할 수 없습니다. 먼저 매수를 진행해 주세요.",
+                "data": {"error": "no_holding_balance"},
+            }
+    else:
+        # 한쪽만 기입된 경우 보정
+        if qty <= 0:
+            qty = amount / entry_price
+        if amount <= 0:
+            amount = qty * entry_price
+
+    # 백분율 기재 변환
+    tp_rate = _to_float(target_profit_rate)
+    sl_rate = _to_float(stop_loss_rate)
+
+    # Supabase RLS 정책 하에 사용자 ID를 가져옴
+    from backend.services.auth_service import get_user_id_from_header
+    try:
+        user_id, _ = get_user_id_from_header(auth_header)
+    except Exception:
+        return {
+            "reply": "인증 정보가 유효하지 않아 조건감시를 등록할 수 없습니다.",
+            "data": {"error": "unauthorized"},
+        }
+
+    # target_profit_rate와 stop_loss_rate의 NOT NULL 제약조건 우회 보정
+    # 사용자가 명시하지 않은 한쪽 조건은 트리거가 불가능한 값(익절 999%, 손절 -99%)으로 대입하여 DB 제약조건을 통과시킵니다.
+    db_tp_rate = tp_rate if tp_rate > 0 else 999.0
+    db_sl_rate = sl_rate if sl_rate > 0 else -99.0
+
+    # DB 인서트
+    row = {
+        "user_id": user_id,
+        "exchange": exchange,
+        "broker_env": broker_env,
+        "asset_type": asset_type,
+        "symbol": symbol,
+        "ticker": ticker,
+        "entry_price": entry_price,
+        "investment_amount": amount,
+        "quantity": qty,
+        "target_profit_rate": db_tp_rate,
+        "stop_loss_rate": db_sl_rate,
+        "execution_mode": execution_mode,
+        "status": "RUNNING",
+    }
+
+    import logging
+    rule_logger = logging.getLogger(__name__)
+
+    try:
+        query_supabase(
+            auth_header,
+            "auto_trading_rules",
+            "POST",
+            json_data=row,
+        )
+    except Exception as error:
+        rule_logger.exception("Failed to insert auto trading rule: %s", str(error))
+        return {
+            "reply": f"조건감시 데이터베이스 등록 중 오류가 발생했습니다: {str(error)[:200]}",
+            "data": {"error": "db_insert_failed", "details": str(error)},
+        }
+
+    # 유저 확인 텍스트 포맷
+    cond_parts = []
+    if tp_rate > 0:
+        cond_parts.append(f"익절: +{tp_rate}% (목표가 약 {entry_price * (1 + tp_rate/100):,.0f}원)")
+    if sl_rate > 0:
+        cond_parts.append(f"손절: -{sl_rate}% (손절가 약 {entry_price * (1 - sl_rate/100):,.0f}원)")
+    cond_text = ", ".join(cond_parts) if cond_parts else "설정된 조건 없음 (규칙이 등록되지 않았거나 비율이 0입니다)"
+
+    mode_text = "즉시 자동 매도(AUTO)" if execution_mode == "AUTO" else "사용자 승인 대기 매도(PROPOSAL)"
+
+    return {
+        "reply": (
+            f"✅ **조건감시 자동매도 규칙이 등록되었습니다.**\n\n"
+            f"- **자산**: {display_name} ({symbol})\n"
+            f"- **거래소 / 계좌**: {exchange} / {broker_env}\n"
+            f"- **기준 현재가 (진입 평단가)**: {entry_price:,.0f}원\n"
+            f"- **수량 / 투자금액**: {qty:,.4f}개 / {amount:,.0f}원\n"
+            f"- **감시 조건**: {cond_text}\n"
+            f"- **수행 동작**: {mode_text}\n\n"
+            f"*백그라운드 워커가 10초 주기로 현재가를 감시하며 조건 도달 시 지정하신 동작을 수행합니다.*"
+        ),
+        "data": {
+            "source": "REGISTER_CONDITIONAL_RULE",
+            "rule": row,
+        },
+    }
+

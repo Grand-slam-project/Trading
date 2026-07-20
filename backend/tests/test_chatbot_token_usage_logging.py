@@ -279,5 +279,5 @@ def test_service_role_usage_write_has_timeout(monkeypatch):
     )
 
     assert captured["url"].endswith("/rest/v1/chatbot_token_usage_logs")
-    assert captured["timeout"] == supabase_client.SERVICE_ROLE_TIMEOUT_SECONDS
+    assert captured["timeout"] == (supabase_client._SUPABASE_CONNECT_TIMEOUT, supabase_client.SERVICE_ROLE_TIMEOUT_SECONDS)
     assert captured["json"] == {"user_id": "user-1"}

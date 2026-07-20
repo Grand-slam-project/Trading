@@ -102,32 +102,24 @@ def _get_toss_exchange_rate_pair(
     base_currency: str,
     quote_currency: str,
 ) -> dict | None:
-    records = query_supabase(
-        auth_header,
-        "user_api_keys",
-        "GET",
-        params={
-            "user_id": f"eq.{user_id}",
-            "exchange": "eq.TOSS",
-            "broker_env": f"eq.{broker_env}",
-            "limit": "1",
-        },
-    )
-    if not records:
+    try:
+        from backend.services.credentials_gateway import CredentialsGateway
+        gateway = CredentialsGateway()
+        creds = gateway.get_credentials(auth_header, user_id, "TOSS", broker_env)
+        
+        client = TossClient(
+            client_id=creds["access_key"],
+            client_secret=creds["secret_key"],
+            account_seq=creds["toss_account_seq"],
+            env=broker_env,
+            user_id=user_id,
+        )
+        return {
+            "rate": client.get_exchange_rate_pair(base_currency, quote_currency),
+            "source": "TOSS",
+        }
+    except Exception:
         return None
-
-    record = records[0]
-    client = TossClient(
-        client_id=current_app.crypto.decrypt(record.get("encrypted_access_key")),
-        client_secret=current_app.crypto.decrypt(record.get("encrypted_secret_key")),
-        account_seq=record.get("toss_account_seq"),
-        env=broker_env,
-        user_id=user_id,
-    )
-    return {
-        "rate": client.get_exchange_rate_pair(base_currency, quote_currency),
-        "source": "TOSS",
-    }
 
 
 def _apply_binance_cost_basis_overlay(auth_header: str, user_id: str, balance: dict) -> None:
@@ -634,20 +626,20 @@ def get_dashboard_balance():
     try:
         user_id, token = get_user_id_from_header(auth_header)
         
-        credential_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
-        params = {
-            "user_id": f"eq.{user_id}",
-            "exchange": f"eq.{credential_exchange}",
-            "broker_env": f"eq.{broker_env}"
-        }
-        records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
-        if not records or len(records) == 0:
-            return jsonify({"success": False, "message": f"등록된 {credential_exchange} ({broker_env}) API 키가 없습니다."}), 404
-
-        record = records[0]
-        crypto_helper = current_app.crypto
-        access_key = crypto_helper.decrypt(record.get("encrypted_access_key"))
-        secret_key = crypto_helper.decrypt(record.get("encrypted_secret_key"))
+        try:
+            from backend.services.credentials_gateway import CredentialsGateway
+            gateway = CredentialsGateway()
+            creds = gateway.get_credentials(auth_header, user_id, exchange, broker_env)
+            access_key = creds["access_key"]
+            secret_key = creds["secret_key"]
+            record = {
+                "toss_account_seq": creds["toss_account_seq"],
+                "toss_account_no": creds["toss_account_no"],
+                "kis_account_no": creds["kis_account_no"],
+                "kis_account_code": creds["kis_account_code"],
+            }
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 404
 
         if exchange == "TOSS":
             account_seq = record.get("toss_account_seq")

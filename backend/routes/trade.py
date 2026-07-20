@@ -449,23 +449,20 @@ trade_bp = Blueprint("trade", __name__)
 
 def _load_user_exchange_record(auth_header: str, user_id: str, exchange: str, broker_env: str) -> tuple[dict, str, str]:
     """
-    사용자 거래소 크리덴셜을 로드하고 복호화합니다.
+    사용자 거래소 크리덴셜을 로드하고 복호화합니다 (CredentialsGateway 경유).
     """
-    crypto_helper = current_app.crypto
-    credential_exchange = "BINANCE" if exchange == "BINANCE_UM_FUTURES" else exchange
-    params = {
-        "user_id": f"eq.{user_id}",
-        "exchange": f"eq.{credential_exchange}",
-        "broker_env": f"eq.{broker_env}"
+    from backend.services.credentials_gateway import CredentialsGateway
+    gateway = CredentialsGateway()
+    creds = gateway.get_credentials(auth_header, user_id, exchange, broker_env)
+    
+    # 기존 코드의 record 딕셔너리 포맷 호환을 위해 객체 구성
+    record = {
+        "toss_account_seq": creds["toss_account_seq"],
+        "toss_account_no": creds["toss_account_no"],
+        "kis_account_no": creds["kis_account_no"],
+        "kis_account_code": creds["kis_account_code"],
     }
-    records = query_supabase(auth_header, "user_api_keys", "GET", params=params)
-    if not records:
-        raise ValueError(f"등록된 {credential_exchange} ({broker_env}) API 키 정보가 없습니다.")
-
-    record = records[0]
-    access_key = crypto_helper.decrypt(record.get("encrypted_access_key"))
-    secret_key = crypto_helper.decrypt(record.get("encrypted_secret_key"))
-    return record, access_key, secret_key
+    return record, creds["access_key"], creds["secret_key"]
 
 
 def _format_user_value_error_message(error: ValueError) -> str:
