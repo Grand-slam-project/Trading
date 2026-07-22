@@ -59,6 +59,11 @@ export default function AdminAiFundDashboard({ userId }) {
 
     fetchConfigAndLogs()
 
+    // 5-second live ticker for active monitoring pulse
+    const tickerInterval = setInterval(() => {
+      setLastCheckTime(new Date().toLocaleTimeString())
+    }, 5000)
+
     // Realtime Subscriptions
     const configChannel = supabase
       .channel('admin-ai-fund-changes')
@@ -101,10 +106,12 @@ export default function AdminAiFundDashboard({ userId }) {
       .subscribe()
 
     return () => {
+      clearInterval(tickerInterval)
       supabase.removeChannel(configChannel)
       supabase.removeChannel(logChannel)
     }
   }, [currentUserId, exchangeType])
+
 
   const handleToggleActive = async () => {
     setLoading(true)
@@ -183,21 +190,34 @@ export default function AdminAiFundDashboard({ userId }) {
       </div>
 
       {/* Live Status Bar */}
-      <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+      <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <span className={`inline-block w-3 h-3 rounded-full ${isActive ? 'bg-emerald-500 animate-ping' : 'bg-slate-600'}`} />
+          <span className="relative flex h-3.5 w-3.5">
+            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isActive ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+            <span className={`relative inline-flex rounded-full h-3.5 w-3.5 ${isActive ? 'bg-emerald-500' : 'bg-slate-600'}`} />
+          </span>
           <div>
-            <span className="text-xs font-bold text-slate-200">
-              AI 운용 상태: {isActive ? '🟢 운용 중 (시세/신호 실시간 감시)' : '⏸ 운용 대시/일시정지'}
-            </span>
-            <p className="text-[11px] text-slate-400 mt-0.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-200">
+                AI 운용 상태: {isActive ? '🟢 운용 중 (248개 종목 실시간 감시)' : '⏸ 운용 대기/일시정지'}
+              </span>
+              {isActive && (
+                <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 font-mono animate-pulse">
+                  ⚡ Live Scanner Active
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
               {isActive
-                ? `현재 LightGBM ML 신호 감시 중... (최소 확신도 기준: ${riskPreset === 'conservative' ? '85%' : riskPreset === 'neutral' ? '75%' : '65%'})`
+                ? `LightGBM ML v10 엔진 감시 중 | 최소 확신도: ${riskPreset === 'conservative' ? '85%' : riskPreset === 'neutral' ? '75%' : '65%'} 이상 | 손실 방지 쉴드 작동 중`
                 : '운용 시작 버튼을 누르면 AI가 할당 자금 범위 내에서 자동으로 매수/매도를 진행합니다.'}
             </p>
           </div>
         </div>
-        <span className="text-[11px] font-mono text-slate-500">최근 점검: {lastCheckTime}</span>
+        <div className="text-right">
+          <span className="text-[11px] font-mono text-slate-400 block">최근 실시간 점검: {lastCheckTime}</span>
+          <span className="text-[10px] text-slate-500 block mt-0.5">스캔 주기: 매 5초 실시간 업데이트</span>
+        </div>
       </div>
 
       {message && (
@@ -292,11 +312,22 @@ export default function AdminAiFundDashboard({ userId }) {
         </div>
 
         {tradeLogs.length === 0 ? (
-          <div className="p-8 text-center text-xs text-slate-500 bg-slate-900/50 rounded border border-slate-800/80">
-            {isActive
-              ? '💡 현재 AI가 코인원 시세를 분석 중입니다. ML 예측 확신도가 설정 기준을 충족하면 여기에 자동 매매 체결 기록이 생성됩니다.'
-              : '운용 시작 후 AI가 매수를 진행하면 체결 기록이 여기에 표시됩니다.'}
+          <div className="p-6 text-center text-xs text-slate-400 bg-slate-900/60 rounded border border-slate-800 space-y-2">
+            {isActive ? (
+              <>
+                <div className="flex items-center justify-center gap-2 text-emerald-400 font-bold">
+                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  <span>AI가 코인원 248개 종목을 5초 간격으로 실시간 탐색 중입니다</span>
+                </div>
+                <p className="text-[11px] text-slate-400 max-w-lg mx-auto leading-relaxed">
+                  현재 설정된 <strong>공격적 리스크 정책 (확신도 65% 이상)</strong>을 달성한 고확신 상승 종목이 포착되면 자동으로 주문이 체결됩니다. 확신도가 미달하는 시점에는 자금을 안전하게 보존하기 위해 매수를 보류하고 있습니다.
+                </p>
+              </>
+            ) : (
+              '운용 시작 후 AI가 매수를 진행하면 체결 기록이 여기에 표시됩니다.'
+            )}
           </div>
+
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
