@@ -5,6 +5,8 @@ import json
 import uuid
 import requests
 
+from backend.services.ai_fund_exchange import ExchangeCapability
+
 class CoinoneClient:
     """
     코인원 API v2.1 연동 및 연결 검증을 담당하는 클라이언트 클래스입니다.
@@ -13,6 +15,15 @@ class CoinoneClient:
         self.access_token = access_token
         self.secret_key = secret_key.encode('utf-8')  # 코인원 Secret Key는 원본 바이트열 그대로 처리
         self.base_url = "https://api.coinone.co.kr"
+
+    def get_capabilities(self) -> ExchangeCapability:
+        """코인원 현물 API에서 검증된 주문 지원 범위를 반환합니다."""
+        return ExchangeCapability(
+            supports_spot=True,
+            supports_order_lookup=True,
+            supports_cancel=True,
+            supports_market_order=False,
+        )
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
@@ -472,4 +483,3 @@ class CoinoneClient:
                 return sorted_tickers
         except Exception as err:
             return []
-

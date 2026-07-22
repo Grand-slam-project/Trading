@@ -53,6 +53,31 @@ def get_crypto_shadow_preset_keys() -> list[str]:
     return ["crypto-v10-full", "crypto-v9-full"]
 
 
+def _request_toss_oauth_token(client_id: str, client_secret: str) -> str | None:
+    try:
+        token_res = requests.post(
+            "https://open-api.tossinvest.com/oauth2/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=10,
+        )
+        token_res.raise_for_status()
+        token_json = token_res.json()
+    except requests.exceptions.RequestException as error:
+        logger.warning("[StockAutomation] Toss OAuth request failed: %s", error)
+        return None
+    except ValueError as error:
+        logger.warning("[StockAutomation] Toss OAuth response was not valid JSON: %s", error)
+        return None
+
+    access_token = token_json.get("access_token") if isinstance(token_json, dict) else None
+    return str(access_token).strip() if access_token else None
+
+
 # 모듈 수준의 전역 상태 변수
 _news_ingest_started = False
 _dart_ingest_started = False
@@ -532,18 +557,7 @@ def start_ml_automation_scheduler(ml_automation_enabled: bool, supabase_service_
                                             client_secret = os.getenv("TOSS_CLIENT_SECRET") or os.getenv("TOSS_SECRET_KEY") or os.getenv("TOSS_API_SECRET")
 
                                         if client_id and client_secret:
-                                            token_res = requests.post(
-                                                "https://open-api.tossinvest.com/oauth2/token",
-                                                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                                                data={
-                                                    "grant_type": "client_credentials",
-                                                    "client_id": client_id,
-                                                    "client_secret": client_secret,
-                                                },
-                                                timeout=10,
-                                            )
-                                            token_json = token_res.json()
-                                            access_token = token_json.get("access_token")
+                                            access_token = _request_toss_oauth_token(client_id, client_secret)
 
                                             if access_token:
 

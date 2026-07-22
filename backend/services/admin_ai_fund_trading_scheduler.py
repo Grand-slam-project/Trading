@@ -12,6 +12,9 @@ import threading
 import time
 from pathlib import Path
 
+from backend.services.supabase_client import safe_query_supabase_as_service_role
+from backend.utils.crypto_helper import CryptoHelper
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +28,6 @@ _ai_fund_started = False
 def _load_active_configs() -> list[dict]:
     """admin_ai_fund_configs 에서 is_active=true 설정 목록을 조회합니다."""
     try:
-        from backend.services.supabase_client import safe_query_supabase_as_service_role
         configs = safe_query_supabase_as_service_role(
             "admin_ai_fund_configs",
             params={"is_active": "eq.true"},
@@ -62,6 +64,13 @@ def _read_crypto_signals(min_confidence_score: float) -> list[dict]:
                 "symbol": str(row["symbol"]),
                 "confidence_score": float(row["signal_score"]) / 100.0,
                 "exchange": str(row.get("exchange", "")).upper(),
+                "signal_id": str(
+                    row.get("signal_id")
+                    or row.get("generated_at")
+                    or row.get("timestamp")
+                    or row.get("created_at")
+                    or f"{row['symbol']}:{row['signal_score']}"
+                ),
             })
         return signals
 
@@ -88,15 +97,79 @@ def _get_current_price_coinone(symbol: str) -> float | None:
 
 
 def _build_exchange_client(exchange_type: str, config: dict):
-    """거래소 클라이언트 인스턴스를 생성합니다. 현재 coinone 지원."""
+    """사용자별 암호화 API 키로 거래소 클라이언트를 생성합니다."""
     exchange = exchange_type.lower()
+    user_id = str(config.get("user_id") or "")
+    broker_env = str(config.get("broker_env") or "REAL").upper()
     if exchange == "coinone":
         from backend.services.coinone_client import CoinoneClient
-        access_token = os.getenv("COINONE_ACCESS_TOKEN", "") or os.getenv("COINONE_API_KEY", "")
-        secret_key = os.getenv("COINONE_SECRET_KEY", "")
+
+        credentials = _load_user_exchange_credentials(
+            user_id=user_id,
+            exchange="COINONE",
+            broker_env=broker_env,
+        )
+        if not credentials:
+            logger.warning(
+                f"[AiFundScheduler] 코인원 사용자 API 키 없음 "
+                f"(user={str(config.get('user_id') or '')[:8]})"
+            )
+            return None
+        access_token = credentials["access_key"]
+        secret_key = credentials["secret_key"]
         return CoinoneClient(access_token=access_token, secret_key=secret_key)
-    # toss / binance 는 향후 추가
+    if exchange == "binance":
+        from backend.services.binance_client import BinanceClient
+
+        credentials = _load_user_exchange_credentials(user_id, "BINANCE", broker_env)
+        if not credentials:
+            logger.warning("[AiFundScheduler] 바이낸스 사용자 API 키 없음 (user=%s)", user_id[:8])
+            return None
+        return BinanceClient(
+            api_key=credentials["access_key"],
+            secret_key=credentials["secret_key"],
+            env=broker_env,
+        )
+    if exchange == "toss":
+        from backend.services.toss_client import TossClient
+
+        credentials = _load_user_exchange_credentials(user_id, "TOSS", broker_env)
+        if not credentials or not credentials.get("toss_account_seq"):
+            logger.warning("[AiFundScheduler] 토스 사용자 API 키 또는 계좌 식별자 없음 (user=%s)", user_id[:8])
+            return None
+        return TossClient(
+            client_id=credentials["access_key"],
+            client_secret=credentials["secret_key"],
+            account_seq=credentials["toss_account_seq"],
+            env=broker_env,
+            user_id=user_id,
+        )
     return None
+
+
+def _load_user_exchange_credentials(user_id: str, exchange: str, broker_env: str = "REAL") -> dict | None:
+    if not user_id:
+        return None
+
+    rows = safe_query_supabase_as_service_role(
+        "user_api_keys",
+        params={
+            "user_id": f"eq.{user_id}",
+            "exchange": f"eq.{exchange}",
+            "broker_env": f"eq.{broker_env}",
+            "limit": "1",
+        },
+    ) or []
+    if not rows:
+        return None
+
+    row = rows[0]
+    crypto = CryptoHelper(os.getenv("ENCRYPTION_KEY", "temporary-key-for-test"))
+    return {
+        "access_key": crypto.decrypt(row.get("encrypted_access_key")),
+        "secret_key": crypto.decrypt(row.get("encrypted_secret_key")),
+        "toss_account_seq": row.get("toss_account_seq"),
+    }
 
 
 def _run_ai_fund_cycle() -> None:
@@ -110,22 +183,90 @@ def _run_ai_fund_cycle() -> None:
         return
 
     from backend.services.admin_ai_managed_trader import AdminAiManagedTrader
+    from backend.services.ai_fund_ledger import AiFundLedger
+    from backend.services.ai_fund_reconciliation import AiFundReconciliationService
 
     # 거래소별로 configs 그룹화 (여러 user_id가 같은 거래소를 쓸 수 있음)
+    signal_cache: dict[float, list[dict]] = {}
     for cfg in configs:
         user_id = cfg.get("user_id", "")
         exchange_type = str(cfg.get("exchange_type", "coinone")).lower()
         min_confidence = float(cfg.get("min_signal_confidence", 0.75))
         max_position_size = float(cfg.get("max_position_size", 0.0))
 
-        if not user_id or max_position_size <= 0:
+        if not user_id:
             continue
 
         # 현재 코인 ML 신호만 지원 (코인원/바이낸스 공통 coinone 예측 CSV 사용)
         if exchange_type not in {"coinone", "binance", "toss"}:
             continue
 
-        signals = _read_crypto_signals(min_confidence)
+        trader = AdminAiManagedTrader(user_id=user_id, exchange_type=exchange_type)
+        client = _build_exchange_client(exchange_type, cfg)
+
+        if client is None:
+            logger.warning(
+                f"[AiFundScheduler] {exchange_type} 주문 클라이언트 없음 — "
+                f"실제 주문과 체결 로그 생성을 건너뜁니다."
+            )
+            continue
+
+        try:
+            reconciliation = AiFundReconciliationService(
+                AiFundLedger(user_id=user_id, exchange_type=exchange_type)
+            ).reconcile_config(cfg, client)
+            needs_review_count = int(getattr(reconciliation, "needs_review_count", 0) or 0)
+            if needs_review_count:
+                logger.warning(
+                    "[AiFundScheduler] 대사 검토 대기 주문 %d건 발생 (user=%s, exchange=%s)",
+                    needs_review_count,
+                    user_id[:8],
+                    exchange_type,
+                )
+        except Exception as reconciliation_error:
+            logger.exception(
+                "[AiFundScheduler] 주문 대사 실패로 신규 진입을 건너뜁니다 (user=%s, exchange=%s): %s",
+                user_id[:8],
+                exchange_type,
+                reconciliation_error,
+            )
+            continue
+
+        try:
+            exit_executed = False
+            list_positions = getattr(trader, "list_open_positions", lambda: [])
+            for position in list_positions():
+                held_symbol = str(position.get("symbol") or "")
+                current_price = _get_current_price_coinone(held_symbol) if exchange_type == "coinone" else None
+                if not current_price or current_price <= 0:
+                    continue
+                exit_signal = trader.evaluate_exit_signal(held_symbol, current_price=current_price)
+                if not exit_signal:
+                    continue
+                result = trader.evaluate_and_execute_signal(
+                    symbol=held_symbol,
+                    signal_type="SELL",
+                    confidence_score=1.0,
+                    current_price=current_price,
+                    exchange_client=client,
+                )
+                if result:
+                    exit_executed = True
+                    logger.info(
+                        f"[AiFundScheduler] SELL 조건 실행 — {held_symbol} "
+                        f"@ {current_price:,.0f} ({exit_signal.get('reason')})"
+                    )
+            if exit_executed:
+                continue
+        except Exception as exit_err:
+            logger.exception(f"[AiFundScheduler] 보유 포지션 청산 검사 오류: {exit_err}")
+
+        if max_position_size <= 0:
+            continue
+
+        if min_confidence not in signal_cache:
+            signal_cache[min_confidence] = _read_crypto_signals(min_confidence)
+        signals = signal_cache[min_confidence]
         if not signals:
             logger.info(
                 f"[AiFundScheduler] 확신도 {min_confidence * 100:.0f}% 초과 신호 없음 "
@@ -133,40 +274,6 @@ def _run_ai_fund_cycle() -> None:
             )
             continue
 
-        trader = AdminAiManagedTrader(user_id=user_id, exchange_type=exchange_type)
-        client = _build_exchange_client(exchange_type, cfg)
-
-        # 거래소 클라이언트가 없으면 시뮬레이션 로그만 기록
-        if client is None:
-            logger.info(
-                f"[AiFundScheduler] {exchange_type} 클라이언트 미구현 — "
-                f"신호 포착: {[s['symbol'] for s in signals[:3]]} (dry-run 로그)"
-            )
-            # dry-run: 로그만 insert (실제 주문 없음)
-            for sig in signals[:1]:
-                try:
-                    from backend.services.supabase_client import safe_query_supabase_as_service_role
-                    safe_query_supabase_as_service_role(
-                        "admin_ai_trade_logs",
-                        method="POST",
-                        json_data={
-                            "user_id": user_id,
-                            "exchange_type": exchange_type,
-                            "symbol": sig["symbol"],
-                            "side": "BUY",
-                            "confidence_score": sig["confidence_score"],
-                            "executed_price": 0.0,
-                            "executed_qty": 0.0,
-                            "total_amount": 0.0,
-                            "order_id": None,
-                            "status": "DRY_RUN",
-                        },
-                    )
-                except Exception as log_err:
-                    logger.warning(f"[AiFundScheduler] dry-run 로그 실패: {log_err}")
-            continue
-
-        # 실제 주문: 상위 1건만 (과도한 주문 방지)
         top_signal = signals[0]
         symbol = top_signal["symbol"]
         confidence = top_signal["confidence_score"]
@@ -183,6 +290,7 @@ def _run_ai_fund_cycle() -> None:
                 confidence_score=confidence,
                 current_price=current_price,
                 exchange_client=client,
+                signal_id=top_signal.get("signal_id"),
             )
             if result:
                 logger.info(
