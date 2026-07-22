@@ -579,10 +579,11 @@ export function AdvancedToolsContainer({
   children,
 }) {
   const tabs = [
-    { id: 'hpo', label: '🎯 Optuna HPO 튜닝' },
-    { id: 'custom', label: '📥 커스텀 수집 & 레포트' },
-    { id: 'universe', label: '🪙 유니버스 종목 관리' },
+    { id: 'hpo', label: 'Optuna HPO 튜닝' },
+    { id: 'custom', label: '커스텀 수집 & 레포트' },
+    { id: 'universe', label: '유니버스 종목 관리' },
   ]
+
 
   return (
     <section className="rounded-lg border border-slate-700 bg-[#0f172a] p-5 shadow-xl">

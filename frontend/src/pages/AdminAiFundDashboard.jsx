@@ -142,9 +142,9 @@ export default function AdminAiFundDashboard({ userId }) {
         setConfigId(data[0].id)
       }
       setIsActive(nextActive)
-      setMessage(nextActive ? '✅ AI 위탁 운용이 시작되었습니다.' : '⏸ AI 위탁 운용이 일시정지되었습니다.')
+      setMessage(nextActive ? 'AI 위탁 운용이 시작되었습니다.' : 'AI 위탁 운용이 일시정지되었습니다.')
     } catch (err) {
-      setMessage(`❌ 오류: ${err.message}`)
+      setMessage(`오류: ${err.message}`)
     } finally {
       setLoading(false)
     }
@@ -152,7 +152,7 @@ export default function AdminAiFundDashboard({ userId }) {
 
 
   const handleEmergencyKillSwitch = async () => {
-    if (!confirm('🚨 긴급 셧다운을 실행하시겠습니까? 모든 AI 자동 매매가 즉시 정지됩니다.')) return
+    if (!confirm('긴급 셧다운을 실행하시겠습니까? 모든 AI 자동 매매가 즉시 정지됩니다.')) return
     setLoading(true)
     try {
       const { error } = await supabase
@@ -162,13 +162,14 @@ export default function AdminAiFundDashboard({ userId }) {
 
       if (error) throw error
       setIsActive(false)
-      setMessage('🚨 [긴급 셧다운 완료] 모든 AI 위탁 운용이 정지되었습니다.')
+      setMessage('[긴급 셧다운 완료] 모든 AI 위탁 운용이 정지되었습니다.')
     } catch (err) {
-      setMessage(`❌ 셧다운 오류: ${err.message}`)
+      setMessage(`셧다운 오류: ${err.message}`)
     } finally {
       setLoading(false)
     }
   }
+
 
   return (
     <div className="p-6 max-w-5xl mx-auto bg-slate-900 text-white rounded-xl shadow-2xl border border-slate-800 space-y-6">
@@ -185,7 +186,7 @@ export default function AdminAiFundDashboard({ userId }) {
           disabled={loading}
           className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-lg transition-colors border border-rose-500 animate-pulse cursor-pointer"
         >
-          🚨 Emergency Stop (Kill-Switch)
+          Emergency Stop (Kill-Switch)
         </button>
       </div>
 
@@ -199,14 +200,15 @@ export default function AdminAiFundDashboard({ userId }) {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-slate-200">
-                AI 운용 상태: {isActive ? '🟢 운용 중 (248개 종목 실시간 감시)' : '⏸ 운용 대기/일시정지'}
+                AI 운용 상태: {isActive ? '운용 중 (248개 종목 실시간 감시)' : '운용 대기/일시정지'}
               </span>
               {isActive && (
                 <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 font-mono animate-pulse">
-                  ⚡ Live Scanner Active
+                  Live Scanner Active
                 </span>
               )}
             </div>
+
             <p className="text-[11px] text-slate-400 mt-1">
               {isActive
                 ? `LightGBM ML v10 엔진 감시 중 | 최소 확신도: ${riskPreset === 'conservative' ? '85%' : riskPreset === 'neutral' ? '75%' : '65%'} 이상 | 손실 방지 쉴드 작동 중`
@@ -289,17 +291,17 @@ export default function AdminAiFundDashboard({ userId }) {
               : 'bg-emerald-600 hover:bg-emerald-700 text-white'
           }`}
         >
-          {isActive ? '⏸ 운용 일시정지' : '▶ AI 위탁 운용 시작'}
+          {isActive ? '운용 일시정지' : 'AI 위탁 운용 시작'}
         </button>
       </div>
 
       {/* Exchange Listing Guard Indicator */}
       <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-[11px]">
         <span className="text-slate-300">
-          🛡️ <strong>거래소 상장 상태 자동 검증 Guard:</strong> 현재 선택된 <strong className="text-emerald-400 font-mono uppercase">{exchangeType}</strong> 거래소에 실제로 상장되어 매매 가능한 248개 종목만 엄격히 필터링하여 AI 매매 주문을 실행합니다.
+          <strong>거래소 상장 상태 자동 검증 Guard:</strong> 현재 선택된 <strong className="text-emerald-400 font-mono uppercase">{exchangeType}</strong> 거래소에 실제로 상장되어 매매 가능한 248개 종목만 엄격히 필터링하여 AI 매매 주문을 실행합니다.
         </span>
         <span className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 font-mono text-[10px]">
-          Exchange Filter Active 🔒
+          Exchange Filter Active
         </span>
       </div>
 
@@ -307,7 +309,8 @@ export default function AdminAiFundDashboard({ userId }) {
 
       <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-bold text-slate-200">🤖 AI 실시간 자동 매매 기록 (Trade History)</h2>
+          <h2 className="text-xs font-bold text-slate-200">AI 실시간 자동 매매 기록 (Trade History)</h2>
+
           <span className="text-[11px] text-slate-500">총 {tradeLogs.length}건 기록됨</span>
         </div>
 
