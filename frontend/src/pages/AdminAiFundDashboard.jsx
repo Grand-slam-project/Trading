@@ -8,18 +8,30 @@ export default function AdminAiFundDashboard({ userId }) {
   const [isActive, setIsActive] = useState(false)
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const [currentUserId, setCurrentUserId] = useState(userId || '')
 
   useEffect(() => {
-    if (!userId) return
+    if (!currentUserId) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user?.id) {
+          setCurrentUserId(session.user.id)
+        }
+      })
+    }
+  }, [currentUserId])
+
+  useEffect(() => {
+    if (!currentUserId) return
 
     // Fetch initial config
     const fetchConfig = async () => {
       const { data } = await supabase
         .from('admin_ai_fund_configs')
         .select('*')
-        .eq('user_id', userId)
+        .eq('user_id', currentUserId)
         .eq('exchange_type', exchangeType)
         .maybeSingle()
+
 
       if (data) {
         setCapital(data.allocated_capital || 5000000)
@@ -39,7 +51,7 @@ export default function AdminAiFundDashboard({ userId }) {
           event: '*',
           schema: 'public',
           table: 'admin_ai_fund_configs',
-          filter: `user_id=eq.${userId}`,
+          filter: `user_id=eq.${currentUserId}`,
         },
         (payload) => {
           if (payload.new) {
@@ -54,7 +66,7 @@ export default function AdminAiFundDashboard({ userId }) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [userId, exchangeType])
+  }, [currentUserId, exchangeType])
 
   const handleToggleActive = async () => {
     setLoading(true)
@@ -62,7 +74,7 @@ export default function AdminAiFundDashboard({ userId }) {
     try {
       const nextActive = !isActive
       const { error } = await supabase.from('admin_ai_fund_configs').upsert({
-        user_id: userId,
+        user_id: currentUserId,
         exchange_type: exchangeType,
         allocated_capital: capital,
         max_position_size: capital * 0.1,
@@ -87,7 +99,8 @@ export default function AdminAiFundDashboard({ userId }) {
       const { error } = await supabase
         .from('admin_ai_fund_configs')
         .update({ is_active: false })
-        .eq('user_id', userId)
+        .eq('user_id', currentUserId)
+
 
       if (error) throw error
       setIsActive(false)

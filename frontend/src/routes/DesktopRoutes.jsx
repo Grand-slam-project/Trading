@@ -8,7 +8,9 @@ import Settings from '../pages/Settings'
 import Home from '../pages/Home'
 import MarketRankings from '../pages/MarketRankings'
 import AdminMlData from '../pages/AdminMlData'
+import AdminAiFundDashboard from '../pages/AdminAiFundDashboard'
 import AssetDetail from '../pages/AssetDetail'
+
 import SearchNotFound from '../pages/SearchNotFound'
 import { INQUIRY_ROUTES } from '../dashboardConstants.js'
 
@@ -124,7 +126,16 @@ export default function DesktopRoutes({
           </AdminProtectedRoute>
         )}
       />
+      <Route
+        path="/admin/ai-fund"
+        element={(
+          <AdminProtectedRoute isLoggedIn={isLoggedIn} userProfile={userProfile}>
+            <AdminAiFundDashboard userId={userProfile?.id} />
+          </AdminProtectedRoute>
+        )}
+      />
       <Route path="/login" element={<Login />} />
+
       <Route path="/signup" element={<Navigate to="/login" replace />} />
       <Route
         path="/asset/:assetType"

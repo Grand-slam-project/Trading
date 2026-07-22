@@ -4,6 +4,8 @@ import { supabase } from '../supabaseClient'
 import AdminInquiries from './AdminInquiries.jsx'
 import AdminUsers from './AdminUsers.jsx'
 import AdminSymbolReconciliation from './AdminSymbolReconciliation.jsx'
+import AdminAiFundDashboard from './AdminAiFundDashboard.jsx'
+
 import {
   ActiveSignalPanel,
   AdvancedDataToolsPanel,
@@ -802,7 +804,19 @@ export default function AdminMlData({ isLoggedIn, userEmail, handleLogout, hideH
           >
             유니버스 설정
           </button>
+          <button
+            type="button"
+            onClick={() => setAdminTab('ai-fund')}
+            className={`shrink-0 px-4 py-3 text-sm font-bold border-b-2 transition sm:px-6 ${
+              adminTab === 'ai-fund'
+                ? 'border-ai-cyan text-emerald-400 bg-emerald-500/10 font-bold'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            🤖 AI 위탁 운용
+          </button>
         </div>
+
 
         {adminTab === 'ml' && (
           <>
@@ -998,7 +1012,12 @@ export default function AdminMlData({ isLoggedIn, userEmail, handleLogout, hideH
         {adminTab === 'universe' && (
           <UniverseManagementPanel isLoggedIn={isLoggedIn} />
         )}
+
+        {adminTab === 'ai-fund' && (
+          <AdminAiFundDashboard />
+        )}
       </main>
+
 
       <JobLogModal
         job={selectedLogJob}
