@@ -125,6 +125,7 @@ export default function AdminAiFundDashboard({ userId }) {
         max_position_size: capital * (riskPreset === 'conservative' ? 0.05 : riskPreset === 'neutral' ? 0.1 : 0.2),
         risk_preset: riskPreset,
         min_signal_confidence: riskPreset === 'conservative' ? 0.85 : riskPreset === 'neutral' ? 0.75 : 0.65,
+        target_take_profit_pct: riskPreset === 'conservative' ? 3.0 : riskPreset === 'neutral' ? 5.0 : 8.0,
         daily_mdd_limit_pct: riskPreset === 'conservative' ? -1.0 : riskPreset === 'neutral' ? -2.0 : -4.0,
         is_active: nextActive,
       }
@@ -150,7 +151,6 @@ export default function AdminAiFundDashboard({ userId }) {
     }
   }
 
-
   const handleEmergencyKillSwitch = async () => {
     if (!confirm('긴급 셧다운을 실행하시겠습니까? 모든 AI 자동 매매가 즉시 정지됩니다.')) return
     setLoading(true)
@@ -169,7 +169,6 @@ export default function AdminAiFundDashboard({ userId }) {
       setLoading(false)
     }
   }
-
 
   return (
     <div className="p-6 max-w-5xl mx-auto bg-slate-900 text-white rounded-xl shadow-2xl border border-slate-800 space-y-6">
@@ -211,7 +210,7 @@ export default function AdminAiFundDashboard({ userId }) {
 
             <p className="text-[11px] text-slate-400 mt-1">
               {isActive
-                ? `LightGBM ML v10 엔진 감시 중 | 최소 확신도: ${riskPreset === 'conservative' ? '85%' : riskPreset === 'neutral' ? '75%' : '65%'} 이상 | 손실 방지 쉴드 작동 중`
+                ? `LightGBM ML v10 엔진 감시 중 | 최소 확신도: ${riskPreset === 'conservative' ? '85%' : riskPreset === 'neutral' ? '75%' : '65%'} 이상 | 목표익절: +${riskPreset === 'conservative' ? '3.0' : riskPreset === 'neutral' ? '5.0' : '8.0'}% | 손실 방지 쉴드 작동 중`
                 : '운용 시작 버튼을 누르면 AI가 할당 자금 범위 내에서 자동으로 매수/매도를 진행합니다.'}
             </p>
           </div>
@@ -256,12 +255,12 @@ export default function AdminAiFundDashboard({ userId }) {
 
       {/* Risk Presets */}
       <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 space-y-3">
-        <label className="text-xs font-semibold text-slate-300 block">리스크 정책 프리셋</label>
+        <label className="text-xs font-semibold text-slate-300 block">리스크 정책 프리셋 (익절 / 손절 / 확신도 기준)</label>
         <div className="grid grid-cols-3 gap-2">
           {[
-            { key: 'conservative', label: '보수적 (-1%)', desc: '확신도 85% 이상 / 1회 5%' },
-            { key: 'neutral', label: '중립적 (-2%)', desc: '확신도 75% 이상 / 1회 10%' },
-            { key: 'aggressive', label: '공격적 (-4%)', desc: '확신도 65% 이상 / 1회 20%' },
+            { key: 'conservative', label: '보수적 (손절 -1%)', desc: '목표익절 +3.0% / 확신도 85% / 1회 5%' },
+            { key: 'neutral', label: '중립적 (손절 -2%)', desc: '목표익절 +5.0% / 확신도 75% / 1회 10%' },
+            { key: 'aggressive', label: '공격적 (손절 -4%)', desc: '목표익절 +8.0% / 확신도 65% / 1회 20%' },
           ].map((preset) => (
             <button
               key={preset.key}
@@ -281,6 +280,7 @@ export default function AdminAiFundDashboard({ userId }) {
       </div>
 
       {/* Start/Pause Button */}
+
       <div className="pt-2 flex justify-end">
         <button
           onClick={handleToggleActive}
