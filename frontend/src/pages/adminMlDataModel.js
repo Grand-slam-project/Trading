@@ -129,6 +129,15 @@ export const tuningPresets = [
     version: 'v8',
     isNew: true,
   },
+  {
+    key: 'crypto-v10-tune',
+    label: '코인 v10 HPO 튜닝',
+    config: 'ml/configs/lgbm_crypto_v10.yaml',
+    defaultTrials: 20,
+    summary: '코인 v10 모델에 대해 Optuna로 최적의 하이퍼파라미터를 탐색합니다 (248개 알트코인 전종목).',
+    version: 'v10',
+    isNew: true,
+  },
 ]
 
 export const automationPresets = [
@@ -159,6 +168,13 @@ export const automationPresets = [
     isNew: true,
   },
   {
+    key: 'crypto-v10-full',
+    label: '코인 v10 자동 수집+학습 (248종목 30m)',
+    summary: '코인원/바이낸스 248개 알트코인 전종목 + 김치프리미엄 & 펀딩비 피처 적용 v10 학습 모델',
+    version: 'v10',
+    isNew: true,
+  },
+  {
     key: 'kr-stock-v1-full',
     label: '국내주식 v1 자동 수집+학습',
     summary: 'KOSPI200/KOSDAQ150 거래대금 50억↑ 동적 스크리닝 및 가변 슬리피지 검증을 포함한 DART 연동 국내주식 모델',
@@ -174,9 +190,10 @@ export const automationPresets = [
   },
 ]
 
-export const operationalAutomationPresets = automationPresets.filter((preset) => ['v8', 'split-v1'].includes(preset.version))
-export const legacyAutomationPresets = automationPresets.filter((preset) => !['v8', 'split-v1'].includes(preset.version))
-export const v8TuningPresets = tuningPresets.filter((preset) => preset.version === 'v8')
+export const operationalAutomationPresets = automationPresets.filter((preset) => ['v8', 'v10', 'split-v1'].includes(preset.version))
+export const legacyAutomationPresets = automationPresets.filter((preset) => !['v8', 'v10', 'split-v1'].includes(preset.version))
+export const v8TuningPresets = tuningPresets.filter((preset) => ['v8', 'v10'].includes(preset.version))
+
 
 export function formatMetric(value) {
   if (value === null || value === undefined || value === '') return '-'

@@ -120,12 +120,12 @@ backtest:
   fee_bps: 6
   slippage_bps: 10
 lightgbm:
-  n_estimators: 280
-  learning_rate: 0.020
-  num_leaves: 85
-  max_depth: 6
-  min_child_samples: 75
-  subsample: 0.90
-  colsample_bytree: 0.80
-  reg_alpha: 0.000001
-  reg_lambda: 0.000001
+  n_estimators: 222
+  learning_rate: 0.028911196064224185
+  num_leaves: 83
+  max_depth: 8
+  min_child_samples: 76
+  subsample: 0.6772305854007946
+  colsample_bytree: 0.6024156788945187
+  reg_alpha: 1.504186616846756e-08
+  reg_lambda: 0.020753682767037214
