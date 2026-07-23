@@ -51,3 +51,8 @@ conflict_report.md
 
 .codegraph
 qa-artifacts/
+
+# Docker Local Overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
