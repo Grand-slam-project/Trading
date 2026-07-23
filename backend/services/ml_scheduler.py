@@ -456,6 +456,7 @@ def start_ml_automation_scheduler(ml_automation_enabled: bool, supabase_service_
                                         "label": preset["label"] + " (Auto)",
                                         "config": training_config["config"],
                                         "risk_config": training_config.get("risk_config"),
+                                        "short_config": training_config.get("short_config"),
                                         "summary_output": training_config.get("summary_output"),
                                         "skip_build_features": bool(training_config.get("skip_build_features", False)),
                                         "dataset_job_id": dataset_job["id"],
@@ -465,6 +466,7 @@ def start_ml_automation_scheduler(ml_automation_enabled: bool, supabase_service_
                                 result = run_ml_pipeline(
                                     config_path=training_config["config"],
                                     risk_config_path=training_config.get("risk_config"),
+                                    short_config_path=training_config.get("short_config"),
                                     skip_build_features=bool(training_config.get("skip_build_features", False)),
                                     summary_output=training_config.get("summary_output"),
                                 )
@@ -647,6 +649,7 @@ def start_ml_automation_scheduler(ml_automation_enabled: bool, supabase_service_
                                                                 "label": preset["label"] + " (Auto)",
                                                                 "config": training_config["config"],
                                                                 "risk_config": training_config.get("risk_config"),
+                                                                "short_config": training_config.get("short_config"),
                                                                 "summary_output": training_config.get("summary_output"),
                                                                 "skip_build_features": bool(training_config.get("skip_build_features", False)),
                                                                 "dataset_job_id": dataset_job["id"],
@@ -676,6 +679,7 @@ def start_ml_automation_scheduler(ml_automation_enabled: bool, supabase_service_
                                                         result = run_ml_pipeline(
                                                             config_path=training_config["config"],
                                                             risk_config_path=training_config.get("risk_config"),
+                                                            short_config_path=training_config.get("short_config"),
                                                             skip_build_features=bool(training_config.get("skip_build_features", False)),
                                                             summary_output=training_config.get("summary_output"),
                                                         )

@@ -82,3 +82,28 @@ def test_failed_fill_insert_does_not_update_position(monkeypatch):
 
     assert applied_quantity == 0.0
     assert all(endpoint != "ai_fund_positions" for endpoint, *_ in writes)
+
+
+def test_update_exit_policy_patches_only_matching_position(monkeypatch):
+    writes = []
+
+    def fake_query(endpoint, method="GET", json_data=None, params=None, **_kwargs):
+        writes.append((endpoint, method, json_data, params))
+        return [json_data] if json_data else []
+
+    monkeypatch.setattr(
+        "backend.services.ai_fund_ledger.safe_query_supabase_as_service_role",
+        fake_query,
+    )
+    ledger = AiFundLedger("user-1", "coinone")
+
+    ledger.update_exit_policy("btc", {"highest_price": 110.0})
+
+    assert writes == [
+        (
+            "ai_fund_positions?user_id=eq.user-1&exchange_type=eq.coinone&strategy_id=eq.ml_signal&symbol=eq.BTC",
+            "PATCH",
+            {"exit_policy": {"highest_price": 110.0}},
+            None,
+        )
+    ]

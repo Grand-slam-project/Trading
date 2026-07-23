@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.services.ai_fund_exchange import OrderRequest, normalize_exchange_order
+from backend.services.ai_fund_exit_policy import evaluate_exit_policy
 from backend.services.ai_fund_ledger import AiFundLedger
 from backend.services.lock_service import distributed_lock
 from backend.services.supabase_client import safe_query_supabase_as_service_role, query_supabase_as_service_role
@@ -34,6 +35,8 @@ class AdminAiManagedTrader:
         current_price: float,
         exchange_client: Any,
         signal_id: str | None = None,
+        requested_quantity: float | None = None,
+        strategy_id: str = "ml_signal",
     ) -> Optional[Dict[str, Any]]:
         """Evaluates ML signal against Admin risk guardrails and executes order if compliant."""
         lock_key = f"admin_ai_trade_{self.user_id}_{self.exchange_type}_{symbol}"
@@ -67,6 +70,12 @@ class AdminAiManagedTrader:
                 )
 
             side_upper = signal_type.upper()
+            normalized_strategy_id = strategy_id.strip().lower() or "ml_signal"
+            strategy_ledger = AiFundLedger(
+                self.user_id,
+                self.exchange_type,
+                normalized_strategy_id,
+            )
             open_position = self._get_open_position(symbol)
             if side_upper == "BUY" and open_position:
                 logger.info(f"[AdminAiTrader] Existing open position found for {symbol}; skipping duplicate BUY")
@@ -81,11 +90,23 @@ class AdminAiManagedTrader:
                 raise AdminAiRiskViolation("Max position size exceeds allocated capital.")
 
             quantity = max_pos_size / current_price if current_price > 0 else 0
+            if side_upper == "BUY":
+                if requested_quantity is not None:
+                    quantity = min(quantity, max(float(requested_quantity), 0.0))
+                self._assert_strategy_budget(
+                    config,
+                    strategy_ledger,
+                    normalized_strategy_id,
+                    quantity * current_price,
+                )
             if side_upper == "SELL":
                 if not open_position:
                     logger.info(f"[AdminAiTrader] No open position found for {symbol}; skipping SELL")
                     return None
                 quantity = float(open_position.get("executed_qty") or 0.0)
+                if requested_quantity is not None:
+                    sellable_quantity = strategy_ledger.get_sellable_quantity(symbol)
+                    quantity = min(quantity, max(float(requested_quantity), 0.0), sellable_quantity)
             if quantity <= 0:
                 raise AdminAiRiskViolation("Calculated trade quantity is invalid.")
 
@@ -127,7 +148,7 @@ class AdminAiManagedTrader:
                     "status": existing_order.get("status"),
                     "idempotent": True,
                 }
-            ledger_order_id = self._create_pending_order(config, request)
+            ledger_order_id = self._create_pending_order(config, request, normalized_strategy_id)
             if operation_mode == "PAPER":
                 simulated_order = normalize_exchange_order(
                     self.exchange_type,
@@ -154,7 +175,7 @@ class AdminAiManagedTrader:
                     executed_qty=quantity,
                     order_id=simulated_order.exchange_order_id,
                 )
-                AiFundLedger(self.user_id, self.exchange_type).apply_new_fill(
+                strategy_ledger.apply_new_fill(
                     simulated_order,
                     order_id=ledger_order_id,
                 )
@@ -186,7 +207,7 @@ class AdminAiManagedTrader:
                 average_fill_price=exchange_order.average_fill_price,
             )
             if exchange_order.filled_qty > 0 and exchange_order.average_fill_price is not None:
-                AiFundLedger(self.user_id, self.exchange_type).apply_new_fill(
+                strategy_ledger.apply_new_fill(
                     exchange_order,
                     order_id=ledger_order_id,
                 )
@@ -202,39 +223,58 @@ class AdminAiManagedTrader:
             return order_result
 
     def evaluate_exit_signal(self, symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
-        """익절 또는 손절 기준에 도달하면 SELL 신호를 반환합니다."""
+        """원장 기반 종료 정책을 평가해 필요한 SELL 신호를 반환합니다."""
         config = self._get_fund_config()
         if not config or not config.get("is_active"):
             return None
 
-        position = self._get_open_position(symbol)
+        ledger = AiFundLedger(self.user_id, self.exchange_type)
+        position = ledger.get_position(symbol) or self._get_open_position(symbol)
         if not position:
             return None
 
-        entry_price = float(position.get("executed_price") or 0.0)
-        quantity = float(position.get("executed_qty") or 0.0)
+        entry_price = float(position.get("average_entry_price", position.get("executed_price", 0.0)) or 0.0)
+        quantity = float(position.get("quantity", position.get("executed_qty", 0.0)) or 0.0)
         if entry_price <= 0 or current_price <= 0 or quantity <= 0:
             return None
 
-        pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
-        take_profit_pct = float(config.get("target_take_profit_pct", 5.0))
-        stop_loss_pct = float(config.get("stop_loss_pct", config.get("daily_mdd_limit_pct", -2.0)))
+        exit_policy = position.get("exit_policy")
+        legacy_policy = not isinstance(exit_policy, dict) or not exit_policy
+        if legacy_policy:
+            exit_policy = {
+                "take_profit_steps": [{
+                    "target_pct": float(config.get("target_take_profit_pct", 5.0)),
+                    "sell_ratio": 1.0,
+                }],
+                "stop_loss_pct": float(config.get("stop_loss_pct", config.get("daily_mdd_limit_pct", -2.0))),
+                "break_even_after_first_target": False,
+            }
 
-        if pnl_pct >= take_profit_pct:
-            return {
-                "symbol": symbol,
-                "signal_type": "SELL",
-                "reason": "TAKE_PROFIT",
-                "quantity": quantity,
-            }
-        if pnl_pct <= stop_loss_pct:
-            return {
-                "symbol": symbol,
-                "signal_type": "SELL",
-                "reason": "STOP_LOSS",
-                "quantity": quantity,
-            }
-        return None
+        evaluation = evaluate_exit_policy(
+            entry_price=entry_price,
+            quantity=quantity,
+            current_price=current_price,
+            policy=exit_policy,
+        )
+        if evaluation.decision is None:
+            if evaluation.next_policy != exit_policy:
+                ledger.update_exit_policy(symbol, evaluation.next_policy)
+            return None
+
+        reason = evaluation.decision.reason
+        if legacy_policy and reason == "TAKE_PROFIT_1":
+            reason = "TAKE_PROFIT"
+        return {
+            "symbol": symbol,
+            "signal_type": "SELL",
+            "reason": reason,
+            "quantity": evaluation.decision.quantity,
+            "next_policy": evaluation.next_policy,
+        }
+
+    def record_exit_policy(self, symbol: str, policy: dict[str, Any]) -> None:
+        """접수된 종료 주문이 반영할 다음 포지션 정책 상태를 저장합니다."""
+        AiFundLedger(self.user_id, self.exchange_type).update_exit_policy(symbol, policy)
 
     def emergency_kill_switch(self) -> bool:
         """Deactivates active AI fund configuration immediately."""
@@ -287,7 +327,12 @@ class AdminAiManagedTrader:
         ) or []
         return rows[0] if isinstance(rows, list) and rows else None
 
-    def _create_pending_order(self, config: Dict[str, Any], request: OrderRequest) -> str:
+    def _create_pending_order(
+        self,
+        config: Dict[str, Any],
+        request: OrderRequest,
+        strategy_id: str = "ml_signal",
+    ) -> str:
         order_id = str(uuid.uuid4())
         safe_query_supabase_as_service_role(
             "ai_fund_orders",
@@ -297,6 +342,7 @@ class AdminAiManagedTrader:
                 "user_id": self.user_id,
                 "config_id": config.get("id"),
                 "exchange_type": self.exchange_type,
+                "strategy_id": strategy_id,
                 "client_order_id": request.client_order_id,
                 "symbol": request.symbol,
                 "side": request.side,
@@ -307,6 +353,23 @@ class AdminAiManagedTrader:
             },
         )
         return order_id
+
+    @staticmethod
+    def _assert_strategy_budget(
+        config: Dict[str, Any],
+        ledger: AiFundLedger,
+        strategy_id: str,
+        requested_notional: float,
+    ) -> None:
+        budgets = config.get("strategy_budgets")
+        if not isinstance(budgets, dict):
+            return
+        try:
+            budget = float(budgets.get(strategy_id, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            budget = 0.0
+        if budget > 0 and ledger.get_strategy_exposure() + requested_notional > budget:
+            raise AdminAiRiskViolation(f"Strategy budget exceeded: {strategy_id}.")
 
     def _update_ledger_order(
         self,

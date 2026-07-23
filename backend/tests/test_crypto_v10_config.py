@@ -17,6 +17,7 @@ def test_lgbm_crypto_v10_config_schema():
     feature_columns = config["model"]["feature_columns"]
     assert "kimchi_premium_pct" in feature_columns
     assert "binance_funding_rate" in feature_columns
+    assert 0 < config["prediction"]["long_threshold"] < 1
 
 
 def test_lgbm_crypto_risk_v10_config_schema():

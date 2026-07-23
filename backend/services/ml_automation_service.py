@@ -234,6 +234,7 @@ AUTOMATION_PRESETS = {
         "training": {
             "config": "ml/configs/lgbm_crypto_v10.yaml",
             "risk_config": "ml/configs/lgbm_crypto_risk_v10.yaml",
+            "short_config": "ml/configs/lgbm_crypto_short_v1.yaml",
             "summary_output": "ml/data/processed/crypto_v10_summary.json",
             "skip_build_features": False,
         },

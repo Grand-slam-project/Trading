@@ -116,7 +116,7 @@ Expected: import error because `AiFundLedger` does not exist.
 Run: `python3 -m pytest backend/tests/test_ai_fund_ledger.py -q`
 Expected: PASS.
 
-### Task 3: AI 위탁 주문 상태 머신과 운용 모드 (코드 완료, 설정 컬럼 마이그레이션 대기)
+### Task 3: AI 위탁 주문 상태 머신과 운용 모드 (코드 및 원격 설정 컬럼 배포 완료)
 
 **Files:**
 - Modify: `backend/services/admin_ai_managed_trader.py`

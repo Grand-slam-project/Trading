@@ -204,9 +204,9 @@ cancel_order(order_id: str) -> ExchangeOrder
 - 스케줄러는 신규 매수 신호보다 먼저 미종료 주문을 대사한다. 거래소 주문을 찾을 수 없거나 조회에 실패하면 검토 대기로 남긴다.
 - PAPER 모드는 모의 체결을 기록하고, CANARY 모드는 매수 금액을 설정 상한으로 제한한다.
 
-### 데이터베이스 적용 보류
+### 데이터베이스 적용 완료
 
-- 원장 마이그레이션 `20260722113315_add_ai_fund_execution_ledger.sql`은 생성됐지만, 이 작업 중 원격 또는 로컬 Supabase DB에 적용하지는 않았다.
-- `operation_mode`, `canary_max_order_amount` 설정 컬럼용 후속 마이그레이션 `20260722120020_add_ai_fund_operation_mode.sql`을 공식 Supabase CLI로 생성했다.
-- 원격 DB migration history에는 로컬에 없는 `20260716065109`가 있고, 로컬에는 원격 이력에 없는 여러 마이그레이션이 있다. 원격 스키마에는 이력 밖 변경(예: `target_take_profit_pct`)도 확인됐다. 따라서 이력 복구나 `db push`를 자동 실행하지 않았으며, 원격 DB 관리자와 이력 정합성 방식을 확정한 뒤에만 실제 적용한다.
-- 따라서 현재 배포 DB에서는 운용 모드가 없는 기존 설정을 `LIVE` 기본값으로 처리한다. PAPER/CANARY는 후속 설정 컬럼 마이그레이션을 적용한 뒤에만 관리자 UI에서 활성화해야 한다.
+- 원장 마이그레이션 `20260722113315_add_ai_fund_execution_ledger.sql`을 원격 Supabase DB에 적용했다. `ai_fund_orders`, `ai_fund_fills`, `ai_fund_positions`, `ai_fund_reconciliation_runs`와 관리자 RLS 정책이 원격 스키마 덤프에서 확인됐다.
+- `operation_mode`, `canary_max_order_amount` 설정 컬럼 마이그레이션 `20260722120020_add_ai_fund_operation_mode.sql`도 적용했다. PAPER/CANARY/LIVE 제약과 CANARY 양수 한도 제약이 활성화됐다.
+- 원격 DB migration history의 `20260716065109`는 `ka6865@gmail.com` 계정이 적용한 뉴스 품질 메타데이터 및 보관 인덱스 SQL이었다. SQL 전문을 원격 이력에서 확인해 같은 이름의 로컬 파일로 복원했다. 기존 `20260716151440_add_news_quality_metadata_retention_indexes.sql`과 내용은 동일하며, 모든 DDL이 `IF NOT EXISTS` 보호를 사용한다.
+- 기존 기본 테이블 파일의 8자리 버전은 Supabase CLI와 호환되지 않아 `20260722100000_admin_ai_fund_tables.sql`로 정규화했고, 기존 정책이 있는 원격에서도 재실행할 수 있도록 정책 생성을 멱등화했다. 원격과 로컬의 마이그레이션 목록은 정합 상태다.

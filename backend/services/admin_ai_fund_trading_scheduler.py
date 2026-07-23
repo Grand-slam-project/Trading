@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+from backend.services.ai_fund_market_data import get_current_price
 from backend.services.supabase_client import safe_query_supabase_as_service_role
 from backend.utils.crypto_helper import CryptoHelper
 
@@ -44,39 +45,22 @@ def _read_crypto_signals(min_confidence_score: float) -> list[dict]:
     signal_score >= min_confidence_score * 100 인 종목을 반환합니다.
     """
     try:
-        if not CRYPTO_PREDICTIONS_PATH.exists():
-            logger.warning(f"[AiFundScheduler] 예측 파일 없음: {CRYPTO_PREDICTIONS_PATH}")
-            return []
+        from backend.services.ai_fund_crypto_selection import AiFundCryptoSelectionService
 
-        import pandas as pd
-        df = pd.read_csv(CRYPTO_PREDICTIONS_PATH, dtype={"symbol": "string"})
-
-        threshold_score = min_confidence_score * 100.0
-        mask = (
-            (df["position"].str.upper() == "LONG") &
-            (df["signal_score"] >= threshold_score)
-        )
-        candidates = df[mask].sort_values("signal_score", ascending=False)
-
-        signals = []
-        for _, row in candidates.iterrows():
-            signals.append({
-                "symbol": str(row["symbol"]),
-                "confidence_score": float(row["signal_score"]) / 100.0,
-                "exchange": str(row.get("exchange", "")).upper(),
-                "signal_id": str(
-                    row.get("signal_id")
-                    or row.get("generated_at")
-                    or row.get("timestamp")
-                    or row.get("created_at")
-                    or f"{row['symbol']}:{row['signal_score']}"
-                ),
-            })
-        return signals
-
+        return AiFundCryptoSelectionService(CRYPTO_PREDICTIONS_PATH).get_snapshot(
+            min_confidence_score=min_confidence_score,
+        )["candidates"]
     except Exception as e:
         logger.warning(f"[AiFundScheduler] 예측 파일 읽기 실패: {e}")
         return []
+
+
+def _normalize_crypto_symbol_for_exchange(exchange_type: str, symbol: str) -> str:
+    """공통 예측 심볼을 거래소 주문 심볼로 변환한다."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    if str(exchange_type).lower() == "coinone" and normalized_symbol.endswith("USDT"):
+        return normalized_symbol[:-4]
+    return normalized_symbol
 
 
 def _get_current_price_coinone(symbol: str) -> float | None:
@@ -94,6 +78,13 @@ def _get_current_price_coinone(symbol: str) -> float | None:
     except Exception as e:
         logger.warning(f"[AiFundScheduler] 코인원 현재가 조회 실패 ({symbol}): {e}")
     return None
+
+
+def _resolve_current_price(exchange_type: str, symbol: str, exchange_client: object | None = None) -> float | None:
+    """거래소별 공통 현재가 리졸버를 반환합니다."""
+    if str(exchange_type).lower() == "coinone":
+        return _get_current_price_coinone(symbol)
+    return get_current_price(exchange_type, symbol, exchange_client)
 
 
 def _build_exchange_client(exchange_type: str, config: dict):
@@ -172,6 +163,83 @@ def _load_user_exchange_credentials(user_id: str, exchange: str, broker_env: str
     }
 
 
+def _run_strategy_templates_for_config(config: dict, exchange_client: object | None = None) -> int:
+    """실행 중인 전략 템플릿을 평가해 보류 TradeIntent만 생성합니다."""
+    from backend.services.ai_fund_strategy_service import AiFundStrategyService
+
+    exchange_type = str(config.get("exchange_type") or "").lower()
+    return AiFundStrategyService().run_active_strategies(
+        str(config.get("user_id") or ""),
+        exchange_type,
+        lambda symbol: _resolve_current_price(exchange_type, symbol, exchange_client),
+    )
+
+
+def _execute_approved_intents_for_config(config: dict, exchange_client: object) -> int:
+    """승인된 TradeIntent만 거래소 주문 흐름으로 전달합니다."""
+    from backend.services.admin_ai_managed_trader import AdminAiManagedTrader
+    from backend.services.ai_fund_intent_executor import AiFundIntentExecutor
+
+    exchange_type = str(config.get("exchange_type") or "").lower()
+    user_id = str(config.get("user_id") or "")
+    if not user_id:
+        return 0
+    trader = AdminAiManagedTrader(user_id=user_id, exchange_type=exchange_type)
+    return AiFundIntentExecutor(trader).run(
+        user_id,
+        exchange_type,
+        exchange_client,
+        lambda symbol: _resolve_current_price(exchange_type, symbol, exchange_client),
+    )
+
+
+def _run_portfolio_rebalance_for_config(config: dict, exchange_client: object | None = None) -> int:
+    """목표 배분 편차를 승인 대기 리밸런싱 의도로 기록합니다."""
+    from backend.services.ai_fund_portfolio_service import AiFundPortfolioService
+
+    exchange_type = str(config.get("exchange_type") or "").lower()
+    return AiFundPortfolioService().create_rebalance_intents(
+        config,
+        lambda symbol: _resolve_current_price(exchange_type, symbol, exchange_client),
+    )
+
+
+def _read_toss_stock_signals(config: dict, trader: object) -> list[dict]:
+    """토스 설정의 국내·미국 주식 후보를 활성 ML 모델에서 자동 선별한다."""
+    from backend.services.ai_fund_stock_selection import AiFundStockSelectionService
+
+    list_positions = getattr(trader, "list_open_positions", lambda: [])
+    held_symbols = {
+        str(position.get("symbol") or "").upper()
+        for position in list_positions()
+        if position.get("symbol")
+    }
+    return AiFundStockSelectionService().select_candidates(config, held_symbols)
+
+
+def _requested_quantity_for_stock_candidate(
+    candidate: dict,
+    candidates: list[dict],
+    config: dict,
+    current_price: float,
+) -> float | None:
+    """시장별 배분과 종목별 한도를 동시에 만족하는 토스 주식 주문 수량을 계산한다."""
+    allocated_capital = float(config.get("allocated_capital") or 0.0)
+    max_position_size = float(config.get("max_position_size") or 0.0)
+    if allocated_capital <= 0 or max_position_size <= 0 or current_price <= 0:
+        return None
+
+    market = str(candidate.get("market") or "").upper()
+    market_candidates = [item for item in candidates if str(item.get("market") or "").upper() == market]
+    if not market_candidates:
+        return None
+
+    market_budget = allocated_capital * float(candidate.get("market_allocation_pct") or 0.0) / 100.0
+    desired_notional = market_budget / len(market_candidates)
+    order_notional = min(max_position_size, desired_notional)
+    return order_notional / current_price if order_notional > 0 else None
+
+
 def _run_ai_fund_cycle() -> None:
     """
     1. 활성 AI 펀드 설정 목록 조회
@@ -184,6 +252,7 @@ def _run_ai_fund_cycle() -> None:
 
     from backend.services.admin_ai_managed_trader import AdminAiManagedTrader
     from backend.services.ai_fund_ledger import AiFundLedger
+    from backend.services.ai_fund_operations import AiFundOperationsService
     from backend.services.ai_fund_reconciliation import AiFundReconciliationService
 
     # 거래소별로 configs 그룹화 (여러 user_id가 같은 거래소를 쓸 수 있음)
@@ -201,6 +270,7 @@ def _run_ai_fund_cycle() -> None:
         if exchange_type not in {"coinone", "binance", "toss"}:
             continue
 
+        operations = AiFundOperationsService()
         trader = AdminAiManagedTrader(user_id=user_id, exchange_type=exchange_type)
         client = _build_exchange_client(exchange_type, cfg)
 
@@ -209,6 +279,7 @@ def _run_ai_fund_cycle() -> None:
                 f"[AiFundScheduler] {exchange_type} 주문 클라이언트 없음 — "
                 f"실제 주문과 체결 로그 생성을 건너뜁니다."
             )
+            operations.record_failure(cfg, "거래소 주문 클라이언트를 생성할 수 없습니다.")
             continue
 
         try:
@@ -223,7 +294,9 @@ def _run_ai_fund_cycle() -> None:
                     user_id[:8],
                     exchange_type,
                 )
+            operations.record_success(cfg)
         except Exception as reconciliation_error:
+            operations.record_failure(cfg, f"주문 대사 실패: {reconciliation_error}")
             logger.exception(
                 "[AiFundScheduler] 주문 대사 실패로 신규 진입을 건너뜁니다 (user=%s, exchange=%s): %s",
                 user_id[:8],
@@ -233,11 +306,62 @@ def _run_ai_fund_cycle() -> None:
             continue
 
         try:
+            created_intents = _run_strategy_templates_for_config(cfg, client)
+            if created_intents:
+                logger.info(
+                    "[AiFundScheduler] 전략 보류 의도 %d건 생성 (user=%s, exchange=%s)",
+                    created_intents,
+                    user_id[:8],
+                    exchange_type,
+                )
+        except Exception as strategy_error:
+            logger.exception(
+                "[AiFundScheduler] 전략 템플릿 평가 실패 (user=%s, exchange=%s): %s",
+                user_id[:8],
+                exchange_type,
+                strategy_error,
+            )
+
+        try:
+            created_rebalance_intents = _run_portfolio_rebalance_for_config(cfg, client)
+            if created_rebalance_intents:
+                logger.info(
+                    "[AiFundScheduler] 리밸런싱 보류 의도 %d건 생성 (user=%s, exchange=%s)",
+                    created_rebalance_intents,
+                    user_id[:8],
+                    exchange_type,
+                )
+        except Exception as rebalance_error:
+            logger.exception(
+                "[AiFundScheduler] 포트폴리오 리밸런싱 평가 실패 (user=%s, exchange=%s): %s",
+                user_id[:8],
+                exchange_type,
+                rebalance_error,
+            )
+
+        try:
+            executed_intents = _execute_approved_intents_for_config(cfg, client)
+            if executed_intents:
+                logger.info(
+                    "[AiFundScheduler] 승인 주문 의도 %d건 실행 (user=%s, exchange=%s)",
+                    executed_intents,
+                    user_id[:8],
+                    exchange_type,
+                )
+        except Exception as intent_error:
+            logger.exception(
+                "[AiFundScheduler] 승인 주문 의도 실행 실패 (user=%s, exchange=%s): %s",
+                user_id[:8],
+                exchange_type,
+                intent_error,
+            )
+
+        try:
             exit_executed = False
             list_positions = getattr(trader, "list_open_positions", lambda: [])
             for position in list_positions():
                 held_symbol = str(position.get("symbol") or "")
-                current_price = _get_current_price_coinone(held_symbol) if exchange_type == "coinone" else None
+                current_price = _resolve_current_price(exchange_type, held_symbol, client)
                 if not current_price or current_price <= 0:
                     continue
                 exit_signal = trader.evaluate_exit_signal(held_symbol, current_price=current_price)
@@ -249,9 +373,14 @@ def _run_ai_fund_cycle() -> None:
                     confidence_score=1.0,
                     current_price=current_price,
                     exchange_client=client,
+                    signal_id=f"exit:{exit_signal.get('reason')}:{held_symbol}",
+                    requested_quantity=float(exit_signal.get("quantity") or 0.0),
                 )
                 if result:
                     exit_executed = True
+                    next_policy = exit_signal.get("next_policy")
+                    if isinstance(next_policy, dict):
+                        trader.record_exit_policy(held_symbol, next_policy)
                     logger.info(
                         f"[AiFundScheduler] SELL 조건 실행 — {held_symbol} "
                         f"@ {current_price:,.0f} ({exit_signal.get('reason')})"
@@ -264,43 +393,65 @@ def _run_ai_fund_cycle() -> None:
         if max_position_size <= 0:
             continue
 
-        if min_confidence not in signal_cache:
-            signal_cache[min_confidence] = _read_crypto_signals(min_confidence)
-        signals = signal_cache[min_confidence]
+        if exchange_type == "toss":
+            signals = _read_toss_stock_signals(cfg, trader)
+        else:
+            if min_confidence not in signal_cache:
+                signal_cache[min_confidence] = _read_crypto_signals(min_confidence)
+            signals = signal_cache[min_confidence] if exchange_type == "coinone" else signal_cache[min_confidence][:1]
         if not signals:
             logger.info(
-                f"[AiFundScheduler] 확신도 {min_confidence * 100:.0f}% 초과 신호 없음 "
+                f"[AiFundScheduler] 신규 진입 후보 없음 "
                 f"(user={user_id[:8]}, exchange={exchange_type})"
             )
             continue
 
-        top_signal = signals[0]
-        symbol = top_signal["symbol"]
-        confidence = top_signal["confidence_score"]
-
-        current_price = _get_current_price_coinone(symbol) if exchange_type == "coinone" else None
-        if not current_price or current_price <= 0:
-            logger.warning(f"[AiFundScheduler] 현재가 조회 실패 ({symbol}) — 매수 건너뜀")
-            continue
-
-        try:
-            result = trader.evaluate_and_execute_signal(
-                symbol=symbol,
-                signal_type="BUY",
-                confidence_score=confidence,
-                current_price=current_price,
-                exchange_client=client,
-                signal_id=top_signal.get("signal_id"),
-            )
-            if result:
+        for signal in signals:
+            symbol = _normalize_crypto_symbol_for_exchange(exchange_type, signal["symbol"])
+            confidence = signal["confidence_score"]
+            is_symbol_tradable = getattr(trader, "is_symbol_tradable_on_exchange", None)
+            if callable(is_symbol_tradable) and not is_symbol_tradable(symbol):
                 logger.info(
-                    f"[AiFundScheduler] BUY 체결 완료 — {symbol} "
-                    f"@ {current_price:,.0f} (확신도 {confidence * 100:.1f}%)"
+                    "[AiFundScheduler] 거래소 미상장 후보 제외 (%s, exchange=%s)",
+                    symbol,
+                    exchange_type,
                 )
-            else:
-                logger.info(f"[AiFundScheduler] BUY 조건 미충족 또는 락 점유 — {symbol}")
-        except Exception as exec_err:
-            logger.exception(f"[AiFundScheduler] 주문 실행 오류 ({symbol}): {exec_err}")
+                continue
+            current_price = _resolve_current_price(exchange_type, symbol, client)
+            if not current_price or current_price <= 0:
+                logger.warning(f"[AiFundScheduler] 현재가 조회 실패 ({symbol}) — 매수 건너뜀")
+                continue
+
+            requested_quantity = None
+            if exchange_type == "toss":
+                requested_quantity = _requested_quantity_for_stock_candidate(
+                    signal,
+                    signals,
+                    cfg,
+                    current_price,
+                )
+
+            try:
+                result = trader.evaluate_and_execute_signal(
+                    symbol=symbol,
+                    signal_type="BUY",
+                    confidence_score=confidence,
+                    current_price=current_price,
+                    exchange_client=client,
+                    signal_id=signal.get("signal_id"),
+                    requested_quantity=requested_quantity,
+                )
+                if result:
+                    logger.info(
+                        f"[AiFundScheduler] BUY 체결 완료 — {symbol} "
+                        f"@ {current_price:,.0f} (확신도 {confidence * 100:.1f}%)"
+                    )
+                else:
+                    logger.info(f"[AiFundScheduler] BUY 조건 미충족 또는 락 점유 — {symbol}")
+                if exchange_type == "coinone":
+                    break
+            except Exception as exec_err:
+                logger.exception(f"[AiFundScheduler] 주문 실행 오류 ({symbol}): {exec_err}")
 
 
 def start_ai_fund_trading_scheduler(

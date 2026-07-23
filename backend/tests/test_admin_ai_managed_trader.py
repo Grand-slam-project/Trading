@@ -63,6 +63,34 @@ def test_evaluate_signal_executes_when_valid():
     mock_exchange.place_order.assert_called_once()
 
 
+def test_evaluate_signal_uses_requested_quantity_for_strategy_intent():
+    trader = AdminAiManagedTrader(user_id="admin-123", exchange_type="coinone")
+    trader._get_fund_config = MagicMock(return_value=active_config(max_position_size=500000.0))
+    trader._get_daily_pnl_pct = MagicMock(return_value=0.0)
+    trader._get_open_position = MagicMock(return_value=None)
+    trader.is_symbol_tradable_on_exchange = MagicMock(return_value=True)
+    trader._log_trade_execution = MagicMock()
+    trader._find_order_by_client_order_id = MagicMock(return_value=None)
+    trader._create_pending_order = MagicMock(return_value="ledger-order-1")
+    trader._update_ledger_order = MagicMock()
+
+    mock_exchange = MagicMock()
+    mock_exchange.place_order.return_value = {"order_id": "ord-grid", "status": "filled"}
+
+    with patch("backend.services.admin_ai_managed_trader.distributed_lock", acquired_lock):
+        trader.evaluate_and_execute_signal(
+            symbol="BTC",
+            signal_type="BUY",
+            confidence_score=0.85,
+            current_price=100.0,
+            exchange_client=mock_exchange,
+            requested_quantity=12.5,
+            strategy_id="grid",
+        )
+
+    assert mock_exchange.place_order.call_args.kwargs["qty"] == 12.5
+
+
 def test_evaluate_signal_blocks_when_daily_mdd_limit_reached():
     trader = AdminAiManagedTrader(user_id="admin-123", exchange_type="coinone")
     trader._get_fund_config = MagicMock(return_value=active_config(daily_mdd_limit_pct=-2.0))
@@ -126,7 +154,10 @@ def test_evaluate_signal_skips_duplicate_buy_when_position_open():
     mock_exchange.place_order.assert_not_called()
 
 
-def test_evaluate_exit_signal_sells_when_take_profit_reached():
+def test_evaluate_exit_signal_sells_when_take_profit_reached(monkeypatch):
+    ledger = MagicMock()
+    ledger.get_position.return_value = None
+    monkeypatch.setattr("backend.services.admin_ai_managed_trader.AiFundLedger", lambda *_args: ledger)
     trader = AdminAiManagedTrader(user_id="admin-123", exchange_type="coinone")
     trader._get_fund_config = MagicMock(return_value=active_config(target_take_profit_pct=5.0))
     trader._get_open_position = MagicMock(return_value={
@@ -137,12 +168,43 @@ def test_evaluate_exit_signal_sells_when_take_profit_reached():
 
     signal = trader.evaluate_exit_signal("BTC", current_price=52600000.0)
 
-    assert signal == {
+    assert signal["symbol"] == "BTC"
+    assert signal["signal_type"] == "SELL"
+    assert signal["reason"] == "TAKE_PROFIT"
+    assert signal["quantity"] == 0.01
+    assert signal["next_policy"]["completed_take_profit_steps"] == [0]
+
+
+def test_evaluate_exit_signal_uses_position_policy_for_partial_take_profit(monkeypatch):
+    ledger = MagicMock()
+    ledger.get_position.return_value = {
         "symbol": "BTC",
-        "signal_type": "SELL",
-        "reason": "TAKE_PROFIT",
-        "quantity": 0.01,
+        "quantity": 10.0,
+        "average_entry_price": 100.0,
+        "exit_policy": {
+            "take_profit_steps": [{"target_pct": 5.0, "sell_ratio": 0.5}],
+            "break_even_after_first_target": True,
+        },
     }
+    monkeypatch.setattr("backend.services.admin_ai_managed_trader.AiFundLedger", lambda *_args: ledger)
+    trader = AdminAiManagedTrader(user_id="admin-123", exchange_type="coinone")
+    trader._get_fund_config = MagicMock(return_value=active_config())
+
+    signal = trader.evaluate_exit_signal("BTC", current_price=105.0)
+
+    assert signal["reason"] == "TAKE_PROFIT_1"
+    assert signal["quantity"] == 5.0
+    assert signal["next_policy"]["break_even_armed"] is True
+
+
+def test_record_exit_policy_persists_only_the_matching_ledger_position(monkeypatch):
+    ledger = MagicMock()
+    monkeypatch.setattr("backend.services.admin_ai_managed_trader.AiFundLedger", lambda *_args: ledger)
+    trader = AdminAiManagedTrader(user_id="admin-123", exchange_type="coinone")
+
+    trader.record_exit_policy("BTC", {"break_even_armed": True})
+
+    ledger.update_exit_policy.assert_called_once_with("BTC", {"break_even_armed": True})
 
 
 def test_daily_pnl_does_not_count_buy_amount_as_loss():

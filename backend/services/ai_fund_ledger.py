@@ -14,9 +14,10 @@ OPEN_SELL_STATUSES = "PENDING_SUBMIT,SUBMITTED,PARTIALLY_FILLED,CANCEL_REQUESTED
 class AiFundLedger:
     """AI 위탁 귀속 포지션만 관리하는 원장 서비스입니다."""
 
-    def __init__(self, user_id: str, exchange_type: str):
+    def __init__(self, user_id: str, exchange_type: str, strategy_id: str = "ml_signal"):
         self.user_id = user_id
         self.exchange_type = exchange_type.lower()
+        self.strategy_id = strategy_id.strip().lower() or "ml_signal"
 
     def get_sellable_quantity(self, symbol: str) -> float:
         position = self._get_position(symbol)
@@ -26,6 +27,7 @@ class AiFundLedger:
             params={
                 "user_id": f"eq.{self.user_id}",
                 "exchange_type": f"eq.{self.exchange_type}",
+                "strategy_id": f"eq.{self.strategy_id}",
                 "symbol": f"eq.{symbol.upper()}",
                 "side": "eq.SELL",
                 "status": f"in.({OPEN_SELL_STATUSES})",
@@ -34,6 +36,56 @@ class AiFundLedger:
         )
         reserved = sum(_to_float(row.get("requested_qty")) for row in reservations)
         return max(quantity - reserved, 0.0)
+
+    def get_position(self, symbol: str) -> dict[str, Any] | None:
+        """원장에 기록된 특정 심볼의 위탁 포지션을 반환합니다."""
+        return self._get_position(symbol)
+
+    def update_exit_policy(self, symbol: str, policy: dict[str, Any]) -> None:
+        """재시작 뒤에도 유지되어야 하는 포지션 종료 정책 상태를 저장합니다."""
+        self._query(
+            (
+                "ai_fund_positions?"
+                f"user_id=eq.{self.user_id}&exchange_type=eq.{self.exchange_type}"
+                f"&strategy_id=eq.{self.strategy_id}"
+                f"&symbol=eq.{symbol.upper()}"
+            ),
+            method="PATCH",
+            json_data={"exit_policy": policy},
+        )
+
+    def get_strategy_exposure(self) -> float:
+        """보유 포지션과 미체결 매수를 합산한 전략별 명목 노출입니다."""
+        positions = self._query(
+            "ai_fund_positions",
+            params={
+                "user_id": f"eq.{self.user_id}",
+                "exchange_type": f"eq.{self.exchange_type}",
+                "strategy_id": f"eq.{self.strategy_id}",
+                "select": "quantity,average_entry_price",
+            },
+        )
+        open_buys = self._query(
+            "ai_fund_orders",
+            params={
+                "user_id": f"eq.{self.user_id}",
+                "exchange_type": f"eq.{self.exchange_type}",
+                "strategy_id": f"eq.{self.strategy_id}",
+                "side": "eq.BUY",
+                "status": "in.(PENDING_SUBMIT,SUBMITTED,PARTIALLY_FILLED,CANCEL_REQUESTED)",
+                "select": "requested_qty,requested_price,filled_qty,average_fill_price",
+            },
+        )
+        position_value = sum(
+            _to_float(row.get("quantity")) * _to_float(row.get("average_entry_price"))
+            for row in positions
+        )
+        pending_value = sum(
+            max(_to_float(row.get("requested_qty")) - _to_float(row.get("filled_qty")), 0.0)
+            * _to_float(row.get("requested_price") or row.get("average_fill_price"))
+            for row in open_buys
+        )
+        return position_value + pending_value
 
     def apply_new_fill(self, order: ExchangeOrder, order_id: str | None = None) -> float:
         """누적 체결 수량에서 아직 반영하지 않은 체결분만 포지션에 적용합니다."""
@@ -51,6 +103,7 @@ class AiFundLedger:
             json_data={
                 "order_id": order_id,
                 "exchange_type": self.exchange_type,
+                "strategy_id": self.strategy_id,
                 "exchange_fill_id": self._synthetic_fill_id(order, recorded, new_quantity),
                 "symbol": order.symbol,
                 "side": order.side,
@@ -83,6 +136,7 @@ class AiFundLedger:
         payload = {
             "user_id": self.user_id,
             "exchange_type": self.exchange_type,
+            "strategy_id": self.strategy_id,
             "symbol": order.symbol,
             "quantity": next_qty,
             "average_entry_price": next_average,
@@ -103,6 +157,7 @@ class AiFundLedger:
             params={
                 "user_id": f"eq.{self.user_id}",
                 "exchange_type": f"eq.{self.exchange_type}",
+                "strategy_id": f"eq.{self.strategy_id}",
                 "symbol": f"eq.{symbol.upper()}",
                 "limit": "1",
             },

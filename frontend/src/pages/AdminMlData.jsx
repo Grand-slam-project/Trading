@@ -818,7 +818,7 @@ export default function AdminMlData({ isLoggedIn, userEmail, handleLogout, userP
                 : 'border-transparent text-slate-400 hover:text-white'
             }`}
           >
-            🤖 AI 위탁 운용
+            AI 위탁 운용
           </button>
         </div>
 
